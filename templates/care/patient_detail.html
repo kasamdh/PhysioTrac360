@@ -1,0 +1,157 @@
+{% extends "care/base.html" %}
+
+{% block content %}
+  <div class="chart-header">
+    <div>
+      <div class="breadcrumb"><a href="{% url 'patient-list' %}">Patients</a><span>/</span> Chart</div>
+      <h1>{{ patient.full_name }}</h1>
+      <p class="muted">MRN {{ patient.medical_record_number }} · DOB {{ patient.date_of_birth|date:"M j, Y" }} · Age {{ patient.age }}</p>
+      {% if patient.diagnoses %}<p class="clinical-context"><strong>Diagnosis:</strong> {{ patient.diagnoses }}</p>{% endif %}
+      {% if patient.precautions %}<p class="clinical-context precaution"><strong>Precautions:</strong> {{ patient.precautions }}</p>{% endif %}
+    </div>
+    <div class="chart-actions">
+      <a class="button button-quiet" href="{% url 'appointment-create' patient.id %}">Schedule</a>
+      <a class="button button-quiet" href="{% url 'secure-messages' patient.id %}">Messages</a>
+      <a class="button button-quiet" href="{% url 'voice-capture' patient.id %}">Voice to note</a>
+      <a class="button" href="{% url 'note-create' patient.id %}">+ New note</a>
+    </div>
+  </div>
+
+  {% if compliance_findings %}
+    <section class="alert-banner">
+      <div><strong>Chart needs review</strong><span>{{ compliance_findings.0.detail }}</span></div>
+      <a href="{% url 'goal-suggestions' patient.id %}">Open care tools</a>
+    </section>
+  {% endif %}
+
+  <section class="chart-nav" aria-label="Patient chart actions">
+    <a href="#documentation">Documentation</a>
+    <a href="#goals">Goals</a>
+    <a href="#outcomes">Outcomes</a>
+    <a href="#timeline">Timeline</a>
+    <a href="#care-tools">Care tools</a>
+  </section>
+
+  <section class="chart-grid">
+    <article id="documentation" class="card span-2">
+      <div class="card-header">
+        <div><p class="eyebrow">Documentation</p><h2>Visits & note status</h2></div>
+        <div class="inline-actions">
+          <form method="post" action="{% url 'draft-create' patient.id %}">{% csrf_token %}<input type="hidden" name="kind" value="progress"><button class="link-button" type="submit">Draft progress note</button></form>
+          <a href="{% url 'note-create' patient.id %}">New note</a>
+        </div>
+      </div>
+      {% if notes %}
+        <div class="note-list">
+          {% for note in notes %}
+            <div class="note-row">
+              <div class="date-block"><strong>{{ note.service_date|date:"d" }}</strong><span>{{ note.service_date|date:"M" }}</span></div>
+              <div><strong>{{ note.get_note_type_display }}</strong><span>{{ note.therapist.get_full_name|default:note.therapist.username }} · {{ note.get_status_display }}</span></div>
+              {% if note.is_signed %}<a class="pill pill-signed" href="{% url 'note-edit' note.id %}">Locked · view</a>{% else %}<a class="button button-small" href="{% url 'note-edit' note.id %}">Open</a>{% endif %}
+            </div>
+          {% endfor %}
+        </div>
+      {% else %}<div class="empty-state">No visits documented yet.</div>{% endif %}
+    </article>
+
+    <article class="card">
+      <div class="card-header"><div><p class="eyebrow">Documentation safety</p><h2>Compliance checks</h2></div></div>
+      {% if compliance_findings %}
+        <ul class="finding-list">
+          {% for finding in compliance_findings %}
+            <li><span class="status-dot {{ finding.severity }}"></span><div><strong>{{ finding.title }}</strong><span>{{ finding.detail }}</span></div></li>
+          {% endfor %}
+        </ul>
+      {% else %}<div class="empty-state positive">No patient-level checks are currently flagged.</div>{% endif %}
+    </article>
+
+    <article id="goals" class="card">
+      <div class="card-header"><div><p class="eyebrow">Functional goals</p><h2>Measurable progress</h2></div><a href="{% url 'goal-suggestions' patient.id %}">Suggest goals</a></div>
+      {% if goals %}
+        <div class="goal-list">
+          {% for goal in goals %}
+            <article class="goal-item">
+              <div class="goal-status"><span class="pill pill-{{ goal.status }}">{{ goal.get_status_display }}</span>{% if goal.progress_percent != None %}<span>{{ goal.progress_percent }}% tracked</span>{% endif %}</div>
+              <strong>{{ goal.functional_task }}</strong>
+              <p>{{ goal.baseline_value }} → {{ goal.target_value }} {{ goal.unit }} by {{ goal.target_date|date:"M j, Y" }}</p>
+              {% if goal.status == 'draft' and user.can_sign_notes %}
+                <form method="post" action="{% url 'goal-approve' goal.id %}">{% csrf_token %}<button class="link-button" type="submit">Approve goal</button></form>
+              {% endif %}
+            </article>
+          {% endfor %}
+        </div>
+      {% else %}<div class="empty-state">No goals have been added. Start with a functional limitation.</div>{% endif %}
+    </article>
+
+    <article id="outcomes" class="card">
+      <div class="card-header"><div><p class="eyebrow">Outcome measures</p><h2>Trend tracking</h2></div><a href="{% url 'outcomes' patient.id %}">Record score</a></div>
+      {% if outcomes %}
+        <div class="outcome-list">
+          {% for trend in outcomes %}
+            <div class="outcome-row">
+              <div><strong>{{ trend.label }}</strong><span>{{ trend.trend }} · Δ {{ trend.delta }} {{ trend.unit }}</span></div>
+              <strong>{{ trend.latest }}{% if trend.maximum %}<small>/{{ trend.maximum }}</small>{% endif %}</strong>
+            </div>
+          {% endfor %}
+        </div>
+      {% else %}<div class="empty-state">Record LEFS, ODI, NDI, QuickDASH, TUG, Berg, or PSFS to begin a trend.</div>{% endif %}
+    </article>
+
+    <article id="timeline" class="card">
+      <div class="card-header"><div><p class="eyebrow">Searchable timeline</p><h2>Recent chart activity</h2></div></div>
+      {% if timeline %}
+        <ol class="timeline">
+          {% for event in timeline %}
+            <li><time>{{ event.date|date:"M j" }}</time><div><strong>{{ event.kind }}</strong><span>{{ event.detail }}</span>{% if event.url %}<a href="{{ event.url }}">Open</a>{% endif %}</div></li>
+          {% endfor %}
+        </ol>
+      {% else %}<div class="empty-state">Timeline entries will appear as care is documented.</div>{% endif %}
+    </article>
+
+    <article id="care-tools" class="card">
+      <div class="card-header"><div><p class="eyebrow">Care tools</p><h2>Draft with review controls</h2></div></div>
+      <div class="tool-actions">
+        <form method="post" action="{% url 'draft-create' patient.id %}">{% csrf_token %}<input type="hidden" name="kind" value="discharge"><button class="tool-button" type="submit"><strong>Discharge draft</strong><span>Source-backed, therapist review required</span></button></form>
+        <form method="post" action="{% url 'draft-create' patient.id %}">{% csrf_token %}<input type="hidden" name="kind" value="handoff"><button class="tool-button" type="submit"><strong>Handoff summary</strong><span>Build from signed visits and active goals</span></button></form>
+        <form method="post" action="{% url 'draft-create' patient.id %}">{% csrf_token %}<input type="hidden" name="kind" value="patient_summary"><button class="tool-button" type="submit"><strong>Patient summary</strong><span>Plain-language draft before release</span></button></form>
+        <a class="tool-button" href="{% url 'home-program-create' patient.id %}"><strong>Home program</strong><span>Check precautions and approve before sharing</span></a>
+      </div>
+    </article>
+
+    <article class="card">
+      <div class="card-header"><div><p class="eyebrow">Voice documentation</p><h2>Reviewed transcripts</h2></div><a href="{% url 'voice-capture' patient.id %}">Add transcript</a></div>
+      {% if voice_captures %}
+        <ul class="compact-list">{% for capture in voice_captures %}<li><div><strong>{{ capture.get_status_display }}</strong><span>{{ capture.created_at|date:"M j, g:i A" }} · {{ capture.duration_seconds }} seconds</span></div>{% if capture.linked_note %}<span class="pill pill-active">Linked</span>{% endif %}</li>{% endfor %}</ul>
+      {% else %}<div class="empty-state">No voice transcripts recorded in this chart.</div>{% endif %}
+    </article>
+
+    <article class="card">
+      <div class="card-header"><div><p class="eyebrow">Home programs</p><h2>Therapist-approved instructions</h2></div></div>
+      {% if home_programs %}
+        <ul class="compact-list">{% for program in home_programs %}<li><div><strong>{{ program.title }}</strong><span>{{ program.get_status_display }} · {{ program.created_at|date:"M j" }}</span></div>{% if program.status == 'draft' and user.can_sign_notes %}<form method="post" action="{% url 'home-program-approve' program.id %}">{% csrf_token %}<button class="link-button">Approve</button></form>{% endif %}</li>{% endfor %}</ul>
+      {% else %}<div class="empty-state">No home programs have been created.</div>{% endif %}
+    </article>
+
+    <article class="card">
+      <div class="card-header"><div><p class="eyebrow">Intake & consent</p><h2>Required chart documents</h2></div><div class="inline-actions"><a href="{% url 'intake-create' patient.id %}">Intake</a><a href="{% url 'consent-create' patient.id %}">Consent</a></div></div>
+      {% if consents %}
+        <ul class="compact-list">{% for consent in consents %}<li><div><strong>{{ consent.get_kind_display }}</strong><span>{{ consent.document_version }} · {{ consent.get_status_display }} · {{ consent.signed_at|date:"M j, Y" }}</span></div><span class="pill {% if consent.status == 'signed' %}pill-active{% else %}pill-draft{% endif %}">{{ consent.get_status_display }}</span></li>{% endfor %}</ul>
+      {% else %}<div class="empty-state">No consent records are on this chart.</div>{% endif %}
+      {% if intakes %}<p class="micro-copy">{{ intakes|length }} intake submission{{ intakes|pluralize }} recorded.</p>{% endif %}
+    </article>
+
+    {% if user.role == 'admin' or user.role == 'director' or user.role == 'biller' %}
+      <article class="card">
+        <div class="card-header"><div><p class="eyebrow">Financial workflow</p><h2>Superbills & payments</h2></div><a href="{% url 'billing-detail' patient.id %}">Open billing</a></div>
+        <p class="muted">Record codes and processor references only. Do not enter payment-card data in the clinical workspace.</p>
+      </article>
+    {% endif %}
+
+    <article class="card span-2">
+      <div class="card-header"><div><p class="eyebrow">Audit snapshot</p><h2>Recent chart access & actions</h2></div>{% if user.role == 'admin' or user.role == 'director' or user.role == 'compliance' %}<a href="{% url 'audit-log' %}">Full audit log</a>{% endif %}</div>
+      {% if recent_audits %}
+        <ul class="compact-list">{% for event in recent_audits %}<li><div><strong>{{ event.action|capfirst }}</strong><span>{{ event.actor.get_full_name|default:event.actor.username|default:"System" }} · {{ event.created_at|date:"M j, g:i A" }}</span></div></li>{% endfor %}</ul>
+      {% else %}<div class="empty-state">No audit events recorded for this chart yet.</div>{% endif %}
+    </article>
+  </section>
+{% endblock %}

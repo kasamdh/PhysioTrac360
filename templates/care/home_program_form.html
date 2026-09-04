@@ -1,0 +1,31 @@
+{% extends "care/base.html" %}
+
+{% block content %}
+  <div class="page-heading">
+    <div>
+      <div class="breadcrumb"><a href="{% url 'patient-detail' patient.id %}">{{ patient.full_name }}</a><span>/</span> Home program</div>
+      <p class="eyebrow">Therapist review required</p>
+      <h1>Home exercise program</h1>
+      <p class="muted">Create patient-friendly instructions only after reviewing diagnosis, precautions, and current goals.</p>
+    </div>
+  </div>
+  <div class="two-column-layout">
+    <section class="card form-card">
+      <form method="post" class="form-grid">
+        {% csrf_token %}
+        {% for field in form %}
+          <div class="field-group"><label for="{{ field.id_for_label }}">{{ field.label }}</label>{{ field }}{% for error in field.errors %}<small class="field-error">{{ error }}</small>{% endfor %}</div>
+        {% endfor %}
+        <button class="button" type="submit">Save home program draft</button>
+      </form>
+    </section>
+    <aside class="card">
+      <p class="eyebrow">Suggestion cues</p><h2>Start safely</h2>
+      {% for group in suggestions %}
+        {% if group.warnings %}<div class="safety-callout">{% for warning in group.warnings %}<span>{{ warning }}</span>{% endfor %}</div>{% endif %}
+        <ul class="instruction-list">{% for exercise in group.exercises %}<li><strong>{{ exercise.name }}</strong><span>{{ exercise.reason }} {{ exercise.dosage }}.</span></li>{% endfor %}</ul>
+      {% endfor %}
+      <p class="safety-note">Suggestions are not prescriptions. Enter individualized dosage, progression, stop rules, and contraindications before approval.</p>
+    </aside>
+  </div>
+{% endblock %}

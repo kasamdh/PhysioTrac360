@@ -1,0 +1,43 @@
+{% extends "care/base.html" %}
+
+{% block content %}
+  <div class="page-heading page-heading-split">
+    <div>
+      <div class="breadcrumb"><a href="{% url 'access-control' %}">Access control</a><span>/</span> User account</div>
+      <p class="eyebrow">Organization access</p>
+      <h1>{{ title }}</h1>
+      {% if account %}<p class="muted">{{ account.get_full_name|default:account.username }} · {{ account.username }}</p>{% else %}<p class="muted">Accounts are automatically assigned to your organization.</p>{% endif %}
+    </div>
+    {% if account %}<a class="button button-quiet" href="{% url 'access-password-reset' account.id %}">Reset password</a>{% endif %}
+  </div>
+  <div class="access-form-layout">
+    <section class="card form-card">
+      <form method="post" class="form-grid">
+        {% csrf_token %}
+        {% if form.non_field_errors %}<div class="form-error">{{ form.non_field_errors }}</div>{% endif %}
+        {% for field in form %}
+          <div class="field-group {% if field.field.widget.input_type == 'checkbox' %}field-group-check{% endif %}">
+            {% if field.field.widget.input_type == 'checkbox' %}
+              <label class="check-label">{{ field }}<span>{{ field.label }}</span></label>
+            {% else %}
+              <label for="{{ field.id_for_label }}">{{ field.label }}{% if field.field.required %}<span class="required">Required</span>{% endif %}</label>{{ field }}
+            {% endif %}
+            {% if field.help_text %}<small class="field-help">{{ field.help_text }}</small>{% endif %}
+            {% for error in field.errors %}<small class="field-error">{{ error }}</small>{% endfor %}
+          </div>
+        {% endfor %}
+        <div class="form-actions"><button class="button" type="submit">Save access settings</button><a class="button button-quiet" href="{% url 'access-control' %}">Cancel</a></div>
+      </form>
+    </section>
+    <aside class="card access-guidance">
+      <p class="eyebrow">Provisioning checklist</p>
+      <h2>Before you save</h2>
+      <ul class="instruction-list">
+        <li>Assign only the role necessary for the user’s job responsibilities.</li>
+        <li>Keep MFA required and use an approved identity provider in production.</li>
+        <li>Deliver temporary credentials through a secure, approved channel.</li>
+        <li>Deactivate rather than delete accounts when access should end.</li>
+      </ul>
+    </aside>
+  </div>
+{% endblock %}

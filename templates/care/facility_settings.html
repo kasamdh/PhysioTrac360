@@ -1,0 +1,51 @@
+{% extends "care/base.html" %}
+
+{% block content %}
+  <div class="page-heading page-heading-split">
+    <div>
+      <div class="breadcrumb"><a href="{% url 'access-control' %}">Access control</a><span>/</span> Facility settings</div>
+      <p class="eyebrow">Facility onboarding & branding</p>
+      <h1>Facility settings</h1>
+      <p class="muted">Update the name, logo, and contact details shown in the authenticated clinical workspace.</p>
+    </div>
+    {% if organization.onboarding_completed_at %}<span class="pill pill-active">Onboarding complete</span>{% else %}<span class="pill pill-draft">Onboarding in progress</span>{% endif %}
+  </div>
+
+  <div class="facility-layout">
+    <section class="card form-card">
+      <form method="post" enctype="multipart/form-data" class="form-grid">
+        {% csrf_token %}
+        {% if form.non_field_errors %}<div class="form-error">{{ form.non_field_errors }}</div>{% endif %}
+        {% for field in form %}
+          <div class="field-group">
+            <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+            {{ field }}
+            {% if field.help_text %}<small class="field-help">{{ field.help_text }}</small>{% endif %}
+            {% for error in field.errors %}<small class="field-error">{{ error }}</small>{% endfor %}
+          </div>
+        {% endfor %}
+        <div class="form-actions"><button class="button" type="submit">Save facility settings</button><a class="button button-quiet" href="{% url 'access-control' %}">Cancel</a></div>
+      </form>
+    </section>
+
+    <aside class="card facility-preview">
+      <p class="eyebrow">Workspace preview</p>
+      <h2>Customer branding</h2>
+      <div class="brand-preview">
+        {% if organization.logo %}
+          <img src="{{ organization.logo.url }}" alt="{{ organization.name }} logo">
+        {% else %}
+          <span class="brand-mark">{{ organization.initials }}</span>
+        {% endif %}
+        <div><strong>{{ organization.name }}</strong><span>Clinical workspace</span></div>
+      </div>
+      <div class="facility-contact">
+        {% if organization.support_email %}<span>{{ organization.support_email }}</span>{% endif %}
+        {% if organization.support_phone %}<span>{{ organization.support_phone }}</span>{% endif %}
+        {% if organization.address %}<span>{{ organization.address|linebreaksbr }}</span>{% endif %}
+        {% if not organization.support_email and not organization.support_phone and not organization.address %}<span class="muted">Add facility contact details for onboarding records.</span>{% endif %}
+      </div>
+      <p class="safety-note">Production logos should be stored in approved object storage, scanned on upload, and delivered through HTTPS.</p>
+    </aside>
+  </div>
+{% endblock %}

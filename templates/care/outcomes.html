@@ -1,0 +1,48 @@
+{% extends "care/base.html" %}
+
+{% block content %}
+  <div class="page-heading">
+    <div>
+      <div class="breadcrumb"><a href="{% url 'patient-detail' patient.id %}">{{ patient.full_name }}</a><span>/</span> Outcomes</div>
+      <p class="eyebrow">Deterministic scoring</p>
+      <h1>Outcome measures & trends</h1>
+      <p class="muted">Record scores from the approved instrument version. Review licensing, scoring rules, and raw-response retention policy before production use.</p>
+    </div>
+  </div>
+  <div class="two-column-layout">
+    <section class="card form-card">
+      <p class="eyebrow">Record score</p><h2>New outcome assessment</h2>
+      <form method="post" class="form-grid">
+        {% csrf_token %}
+        {% for field in form %}
+          <div class="field-group"><label for="{{ field.id_for_label }}">{{ field.label }}</label>{{ field }}{% for error in field.errors %}<small class="field-error">{{ error }}</small>{% endfor %}</div>
+        {% endfor %}
+        <button class="button" type="submit">Save score</button>
+      </form>
+    </section>
+    <section class="card">
+      <p class="eyebrow">Trend summary</p><h2>Current trajectory</h2>
+      {% if trends %}
+        <div class="trend-list">
+          {% for trend in trends %}
+            <article class="trend-card">
+              <div><strong>{{ trend.label }}</strong><span class="pill {% if trend.trend == 'Improving' %}pill-active{% else %}pill-draft{% endif %}">{{ trend.trend }}</span></div>
+              <strong class="trend-score">{{ trend.latest }}{% if trend.maximum %}<small>/{{ trend.maximum }}</small>{% endif %}</strong>
+              <p>Change from first recorded score: {{ trend.delta }} {{ trend.unit }}</p>
+              <div class="sparkline" aria-label="{{ trend.label }} scores">
+                {% for point in trend.points %}<span style="height:{% widthratio point.score trend.maximum|default:100 100 %}%;" title="{{ point.measured_on }}: {{ point.score }}"></span>{% endfor %}
+              </div>
+              <small>Data table: {% for point in trend.points %}{{ point.measured_on|date:"M j" }} {{ point.score }}{% if not forloop.last %} · {% endif %}{% endfor %}</small>
+            </article>
+          {% endfor %}
+        </div>
+      {% else %}<div class="empty-state">No outcome scores recorded yet.</div>{% endif %}
+    </section>
+  </div>
+  <section class="card">
+    <div class="card-header"><div><p class="eyebrow">Assessment history</p><h2>Recorded scores</h2></div></div>
+    {% if scores %}
+      <div class="table-wrap"><table><thead><tr><th>Date</th><th>Instrument</th><th>Score</th><th>Notes</th></tr></thead><tbody>{% for score in scores %}<tr><td>{{ score.measured_on|date:"M j, Y" }}</td><td>{{ score.get_measure_display }}</td><td><strong>{{ score.score }}</strong>{% if score.maximum_score %} / {{ score.maximum_score }}{% endif %}</td><td>{{ score.notes|default:"—" }}</td></tr>{% endfor %}</tbody></table></div>
+    {% else %}<div class="empty-state">No scores in history.</div>{% endif %}
+  </section>
+{% endblock %}

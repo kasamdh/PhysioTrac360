@@ -1,0 +1,114 @@
+{% extends "care/base.html" %}
+
+{% block content %}
+  <div class="page-heading page-heading-split">
+    <div>
+      <div class="breadcrumb"><a href="{% url 'patient-detail' patient.id %}">{{ patient.full_name }}</a><span>/</span> Documentation</div>
+      <h1>{% if note %}{{ note.get_note_type_display }}{% else %}New clinical note{% endif %}</h1>
+      <p class="muted">Drafts remain editable. A licensed therapist must review and finalize the completed record.</p>
+    </div>
+    {% if note and note.is_signed %}<span class="pill pill-signed">Signed and locked</span>{% endif %}
+  </div>
+
+  {% if voice_capture %}
+    <div class="alert-banner"><div><strong>Voice transcript attached</strong><span>The transcript has been copied into the draft. Verify accuracy before saving.</span></div></div>
+  {% endif %}
+
+  <div class="note-layout">
+    <section class="card note-editor">
+      {% if note and note.is_signed %}
+        <div class="signed-note">
+          <p class="eyebrow">Locked record</p>
+          <h2>Signed by {{ note.signature_name }}</h2>
+          <p>{{ note.signed_at|date:"M j, Y, g:i A" }} · Corrections require an addendum.</p>
+          {% if user.can_sign_notes %}<a class="button button-quiet" href="{% url 'note-addendum-create' note.id %}">Create addendum</a>{% endif %}
+          <div class="signed-section"><strong>Subjective</strong><p>{{ note.subjective|linebreaksbr }}</p></div>
+          <div class="signed-section"><strong>Objective</strong><p>{{ note.objective|linebreaksbr }}</p></div>
+          <div class="signed-section"><strong>Interventions</strong><p>{{ note.interventions|linebreaksbr }}</p></div>
+          <div class="signed-section"><strong>Assessment</strong><p>{{ note.assessment|linebreaksbr }}</p></div>
+          <div class="signed-section"><strong>Plan</strong><p>{{ note.plan|linebreaksbr }}</p></div>
+        </div>
+      {% else %}
+        <form method="post" class="form-grid note-form">
+          {% csrf_token %}
+          {% if form.non_field_errors %}<div class="form-error">{{ form.non_field_errors }}</div>{% endif %}
+          <div class="form-section">
+            <h2>Visit context</h2>
+            <div class="form-columns">
+              {% for field in form %}
+                {% if field.name == 'appointment' or field.name == 'note_type' or field.name == 'service_date' %}
+                  <div class="field-group">
+                    <label for="{{ field.id_for_label }}">{{ field.label }}</label>{{ field }}
+                    {% for error in field.errors %}<small class="field-error">{{ error }}</small>{% endfor %}
+                  </div>
+                {% endif %}
+              {% endfor %}
+            </div>
+          </div>
+          <div class="form-section">
+            <h2>Clinical context</h2>
+            {% for field in form %}
+              {% if field.name == 'diagnosis_snapshot' or field.name == 'precautions_snapshot' %}
+                <div class="field-group"><label for="{{ field.id_for_label }}">{{ field.label }}</label>{{ field }}{% for error in field.errors %}<small class="field-error">{{ error }}</small>{% endfor %}</div>
+              {% endif %}
+            {% endfor %}
+          </div>
+          <div class="form-section">
+            <h2>Structured visit note</h2>
+            {% for field in form %}
+              {% if field.name == 'subjective' or field.name == 'objective' or field.name == 'interventions' or field.name == 'assessment' or field.name == 'plan' %}
+                <div class="field-group">
+                  <label for="{{ field.id_for_label }}">{{ field.label }}{% if field.name == 'objective' or field.name == 'plan' %}<span class="required">Required to finalize</span>{% endif %}</label>{{ field }}
+                  {% for error in field.errors %}<small class="field-error">{{ error }}</small>{% endfor %}
+                </div>
+              {% endif %}
+            {% endfor %}
+          </div>
+          <div class="form-section">
+            <h2>Plan of care & reassessment</h2>
+            <div class="form-columns">
+              {% for field in form %}
+                {% if field.name == 'plan_of_care_start' or field.name == 'plan_of_care_end' or field.name == 'frequency_per_week' or field.name == 'duration_weeks' or field.name == 'reassessment_due' %}
+                  <div class="field-group"><label for="{{ field.id_for_label }}">{{ field.label }}</label>{{ field }}{% for error in field.errors %}<small class="field-error">{{ error }}</small>{% endfor %}</div>
+                {% endif %}
+              {% endfor %}
+            </div>
+          </div>
+          <div class="form-actions note-actions">
+            <button class="button button-quiet" type="submit">Save draft</button>
+            <button class="button" name="submit_for_review" value="1" type="submit">Submit for review</button>
+          </div>
+        </form>
+      {% endif %}
+    </section>
+
+    <aside class="note-sidebar">
+      <section class="card">
+        <p class="eyebrow">Finalization checks</p>
+        <h2>Documentation safety</h2>
+        {% if compliance_findings %}
+          <ul class="finding-list">
+            {% for finding in compliance_findings %}
+              <li><span class="status-dot {{ finding.severity }}"></span><div><strong>{{ finding.title }}</strong><span>{{ finding.detail }}</span></div></li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <p class="muted">Save the draft to run note-specific checks.</p>
+        {% endif %}
+        {% if note and not note.is_signed and user.can_sign_notes %}
+          <form method="post" action="{% url 'note-sign' note.id %}" class="finalize-form">
+            {% csrf_token %}
+            <label class="check-label"><input class="field-check" type="checkbox" name="attestation" value="confirmed" required><span>I reviewed this note and attest it is accurate and complete.</span></label>
+            <button class="button button-wide" type="submit">Therapist review & finalize</button>
+          </form>
+        {% endif %}
+      </section>
+      <section class="card">
+        <p class="eyebrow">Clinical tools</p>
+        <h2>Work from evidence</h2>
+        <p class="muted">Use patient-level draft tools for progress, discharge, handoff, and patient summaries. Outputs remain drafts until a therapist approves them.</p>
+        <a class="button button-quiet button-wide" href="{% url 'patient-detail' patient.id %}#care-tools">Open clinical drafts</a>
+      </section>
+    </aside>
+  </div>
+{% endblock %}

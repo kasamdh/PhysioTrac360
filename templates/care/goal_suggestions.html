@@ -1,0 +1,46 @@
+{% extends "care/base.html" %}
+
+{% block content %}
+  <div class="page-heading">
+    <div>
+      <div class="breadcrumb"><a href="{% url 'patient-detail' patient.id %}">{{ patient.full_name }}</a><span>/</span> Goals</div>
+      <p class="eyebrow">Functional limitation first</p>
+      <h1>Measurable goal suggestions</h1>
+      <p class="muted">Suggestions are editable drafts. A therapist must approve a goal before it becomes active.</p>
+    </div>
+  </div>
+  <section class="card form-card">
+    <form method="post" class="form-grid">
+      {% csrf_token %}
+      <div class="field-group">
+        <label for="functional_limitation">What functional activity is limited?</label>
+        <textarea class="field-input" id="functional_limitation" name="functional_limitation" rows="3" required placeholder="Example: Unable to safely descend the stairs to enter the home.">{{ limitation }}</textarea>
+      </div>
+      <div class="field-group">
+        <label for="measure">Optional outcome measure</label>
+        <select class="field-input" id="measure" name="measure"><option value="">Select a measure</option>{% for value, label in measure_choices %}<option value="{{ value }}">{{ label }}</option>{% endfor %}</select>
+      </div>
+      <div class="form-actions"><button class="button" type="submit">Create suggestions</button></div>
+    </form>
+  </section>
+
+  {% if suggestions %}
+    <section class="suggestion-grid">
+      {% for suggestion in suggestions %}
+        <article class="card suggestion-card">
+          <p class="eyebrow">Editable clinical draft</p>
+          <h2>{{ suggestion.functional_task }}</h2>
+          <p>{{ suggestion.wording }}</p>
+          <dl class="suggestion-details"><div><dt>Baseline</dt><dd>{{ suggestion.baseline_hint }}</dd></div><div><dt>Target</dt><dd>{{ suggestion.target_hint }}</dd></div><div><dt>Measure</dt><dd>{{ suggestion.measurement_method }}</dd></div></dl>
+          <form method="get" action="{% url 'goal-create' patient.id %}">
+            <input type="hidden" name="functional_limitation" value="{{ suggestion.functional_limitation }}">
+            <input type="hidden" name="functional_task" value="{{ suggestion.functional_task }}">
+            <input type="hidden" name="measurement_method" value="{{ suggestion.measurement_method }}">
+            <input type="hidden" name="suggested_wording" value="{{ suggestion.wording }}">
+            <button class="button button-wide" type="submit">Use as editable draft</button>
+          </form>
+        </article>
+      {% endfor %}
+    </section>
+  {% endif %}
+{% endblock %}

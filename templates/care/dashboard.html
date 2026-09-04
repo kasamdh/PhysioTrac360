@@ -1,0 +1,95 @@
+{% extends "care/base.html" %}
+
+{% block content %}
+  <div class="page-heading page-heading-split">
+    <div>
+      <p class="eyebrow">Today · {{ today|date:"l, F j" }}</p>
+      <h1>Clinical command center</h1>
+      <p class="muted">Start the next visit, resolve documentation needs, and keep care moving.</p>
+    </div>
+    {% if user.can_access_clinical %}
+      <a class="button button-quiet" href="{% url 'patient-list' %}">Open patient charts</a>
+    {% endif %}
+  </div>
+
+  <section class="metrics-grid" aria-label="Today at a glance">
+    <article class="metric-card"><span class="metric-icon crimson">◷</span><div><strong>{{ appointment_count }}</strong><span>Visits today</span></div></article>
+    <article class="metric-card"><span class="metric-icon amber">▤</span><div><strong>{{ pending_note_count }}</strong><span>Notes awaiting review</span></div></article>
+    <article class="metric-card"><span class="metric-icon purple">⌁</span><div><strong>{{ due_note_count }}</strong><span>Reassessments due</span></div></article>
+    <article class="metric-card"><span class="metric-icon green">✉</span><div><strong>{{ unread_message_count }}</strong><span>Secure messages</span></div></article>
+  </section>
+
+  <section class="dashboard-grid">
+    <article class="card">
+      <div class="card-header">
+        <div><p class="eyebrow">Schedule</p><h2>Today’s visits</h2></div>
+        {% if user.can_manage_schedule %}<a href="{% url 'schedule' %}">View schedule</a>{% endif %}
+      </div>
+      {% if appointments %}
+        <div class="appointment-list">
+          {% for appointment in appointments %}
+            <div class="appointment-row">
+              <time>{{ appointment.starts_at|time:"g:i A" }}</time>
+              <div>
+                <strong>{{ appointment.patient.full_name }}</strong>
+                <span>{{ appointment.get_kind_display }} · {{ appointment.location|default:"Location pending" }}{% if appointment.is_home_visit %} · Home visit{% endif %}</span>
+              </div>
+              {% if user.can_access_clinical %}
+                <a class="button button-small" href="{% url 'note-create' appointment.patient_id %}">Start note</a>
+              {% endif %}
+            </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="empty-state">No visits scheduled for this day.</div>
+      {% endif %}
+    </article>
+
+    <article class="card">
+      <div class="card-header"><div><p class="eyebrow">Safety queue</p><h2>Needs attention</h2></div></div>
+      {% if patient_alerts or due_notes %}
+        <ul class="attention-list">
+          {% for item in patient_alerts %}
+            <li>
+              <span class="status-dot high"></span>
+              <div><strong>{{ item.finding.title }}</strong><span>{{ item.patient.full_name }} · {{ item.finding.detail }}</span></div>
+              <a href="{% url 'patient-detail' item.patient.id %}">Review</a>
+            </li>
+          {% endfor %}
+          {% for note in due_notes %}
+            <li>
+              <span class="status-dot high"></span>
+              <div><strong>Reassessment due</strong><span>{{ note.patient.full_name }} · due {{ note.reassessment_due|date:"M j" }}</span></div>
+              <a href="{% url 'note-edit' note.id %}">Open</a>
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <div class="empty-state positive">No documentation alerts need attention.</div>
+      {% endif %}
+    </article>
+  </section>
+
+  <section class="dashboard-grid dashboard-grid-bottom">
+    <article class="card">
+      <div class="card-header"><div><p class="eyebrow">Documentation</p><h2>Draft notes</h2></div></div>
+      {% if pending_notes %}
+        <ul class="compact-list">
+          {% for note in pending_notes %}
+            <li><div><strong>{{ note.patient.full_name }}</strong><span>{{ note.get_note_type_display }} · {{ note.service_date|date:"M j" }}</span></div><a href="{% url 'note-edit' note.id %}">{{ note.get_status_display }}</a></li>
+          {% endfor %}
+        </ul>
+      {% else %}<div class="empty-state">No draft notes in your scope.</div>{% endif %}
+    </article>
+    <article class="card">
+      <div class="card-header"><div><p class="eyebrow">Clinical drafts</p><h2>Therapist review required</h2></div></div>
+      {% if ai_drafts %}
+        <ul class="compact-list">
+          {% for artifact in ai_drafts %}
+            <li><div><strong>{{ artifact.get_kind_display }}</strong><span>{{ artifact.patient.full_name }} · {{ artifact.created_at|date:"M j, g:i A" }}</span></div><a href="{% url 'artifact-detail' artifact.id %}">Review</a></li>
+          {% endfor %}
+        </ul>
+      {% else %}<div class="empty-state">No clinical drafts awaiting review.</div>{% endif %}
+    </article>
+  </section>
+{% endblock %}

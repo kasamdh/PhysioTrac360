@@ -1,0 +1,24 @@
+{% extends "care/base.html" %}
+
+{% block content %}
+  <div class="page-heading">
+    <div>
+      <div class="breadcrumb"><a href="{% url 'patient-detail' patient.id %}">{{ patient.full_name }}</a><span>/</span> Secure messaging</div>
+      <p class="eyebrow">In-app communication</p>
+      <h1>Secure messages</h1>
+      <p class="muted">Send care coordination only through the authenticated workspace. Notifications outside this system should not contain PHI.</p>
+    </div>
+  </div>
+  <div class="two-column-layout message-layout">
+    <section class="card">
+      <div class="card-header"><div><p class="eyebrow">Conversation</p><h2>Patient thread</h2></div></div>
+      {% if thread %}
+        <div class="message-thread">{% for message in thread %}<article class="message-card {% if message.sender_id == user.id %}message-outbound{% endif %}"><div><strong>{{ message.sender.get_full_name|default:message.sender.username }}</strong><time>{{ message.created_at|date:"M j, g:i A" }}</time></div><h3>{{ message.subject }}</h3><p>{{ message.body|linebreaksbr }}</p></article>{% endfor %}</div>
+      {% else %}<div class="empty-state">No messages in this patient thread.</div>{% endif %}
+    </section>
+    <section class="card form-card">
+      <p class="eyebrow">New message</p><h2>Compose securely</h2>
+      <form method="post" class="form-grid">{% csrf_token %}{% for field in form %}<div class="field-group"><label for="{{ field.id_for_label }}">{{ field.label }}</label>{{ field }}{% for error in field.errors %}<small class="field-error">{{ error }}</small>{% endfor %}</div>{% endfor %}<button class="button" type="submit">Send secure message</button></form>
+    </section>
+  </div>
+{% endblock %}

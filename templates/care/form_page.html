@@ -1,0 +1,33 @@
+{% extends "care/base.html" %}
+
+{% block content %}
+  <div class="page-heading">
+    <div>
+      <p class="eyebrow">Clinical workspace</p>
+      <h1>{{ title }}</h1>
+      {% if patient %}<p class="muted">Patient: {{ patient.full_name }} · {{ patient.medical_record_number }}</p>{% endif %}
+    </div>
+  </div>
+  <section class="card form-card">
+    <form method="post" class="form-grid">
+      {% csrf_token %}
+      {% if form.non_field_errors %}<div class="form-error">{{ form.non_field_errors }}</div>{% endif %}
+      {% for field in form %}
+        <div class="field-group {% if field.field.widget.input_type == 'checkbox' %}field-group-check{% endif %}">
+          {% if field.field.widget.input_type == 'checkbox' %}
+            <label class="check-label">{{ field }} <span>{{ field.label }}</span></label>
+          {% else %}
+            <label for="{{ field.id_for_label }}">{{ field.label }}{% if field.field.required %}<span class="required">Required</span>{% endif %}</label>
+            {{ field }}
+          {% endif %}
+          {% if field.help_text %}<small class="field-help">{{ field.help_text }}</small>{% endif %}
+          {% for error in field.errors %}<small class="field-error">{{ error }}</small>{% endfor %}
+        </div>
+      {% endfor %}
+      <div class="form-actions">
+        <button class="button" type="submit">Save</button>
+        <a class="button button-quiet" href="javascript:history.back()">Cancel</a>
+      </div>
+    </form>
+  </section>
+{% endblock %}

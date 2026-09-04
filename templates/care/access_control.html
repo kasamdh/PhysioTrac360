@@ -1,0 +1,65 @@
+{% extends "care/base.html" %}
+
+{% block content %}
+  <div class="page-heading page-heading-split">
+    <div>
+      <p class="eyebrow">Organization administration</p>
+      <h1>Access control</h1>
+      <p class="muted">Provision and deactivate organization accounts, assign minimum-necessary roles, and enforce the MFA policy flag. Access changes are recorded in audit history.</p>
+    </div>
+    <a class="button" href="{% url 'employee-onboard' %}">+ Onboard employee</a>
+  </div>
+
+  <section class="access-notice">
+    <strong>Security boundary</strong>
+    <span>Deactivation preserves the audit trail and is preferred to deleting accounts. The MFA setting is a policy flag; connect an approved identity provider to enforce MFA in production.</span>
+  </section>
+
+  <section class="card">
+    <div class="card-header">
+      <div><p class="eyebrow">Organization accounts</p><h2>Assigned access</h2></div>
+      <span class="agenda-count">{{ users|length }} account{{ users|pluralize }}</span>
+    </div>
+    {% if users %}
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>User</th><th>Role</th><th>MFA policy</th><th>Account state</th><th></th></tr></thead>
+          <tbody>
+            {% for account in users %}
+              <tr>
+                <td>
+                  <strong>{{ account.get_full_name|default:account.username }}</strong>
+                  <small>{{ account.username }}{% if account.email %} · {{ account.email }}{% endif %}{% if account.credential %} · {{ account.credential }}{% endif %}</small>
+                </td>
+                <td><span class="pill pill-{{ account.role }}">{{ account.get_role_display }}</span></td>
+                <td>{% if account.must_use_mfa %}<span class="access-state access-state-secure">Required</span>{% else %}<span class="access-state access-state-warning">Not required</span>{% endif %}</td>
+                <td>{% if account.is_active %}<span class="pill pill-active">Active</span>{% else %}<span class="pill pill-inactive">Deactivated</span>{% endif %}</td>
+                <td>
+                  {% if user.is_superuser or account.id == user.id or account.role != 'admin' and not account.is_staff and not account.is_superuser %}
+                    <a href="{% url 'access-user-update' account.id %}">Manage</a>
+                  {% else %}
+                    <span class="muted">Platform managed</span>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="empty-state">No accounts have been assigned to this organization.</div>
+    {% endif %}
+  </section>
+
+  <section class="card role-matrix">
+    <div class="card-header"><div><p class="eyebrow">Role reference</p><h2>Minimum-necessary access</h2></div></div>
+    <div class="role-grid">
+      {% for role in role_capabilities %}
+        <article class="role-card">
+          <span class="pill pill-{{ role.role }}">{{ role.label }}</span>
+          <p>{{ role.summary }}</p>
+        </article>
+      {% endfor %}
+    </div>
+  </section>
+{% endblock %}

@@ -1,0 +1,47 @@
+{% extends "care/base.html" %}
+
+{% block content %}
+  <div class="page-heading page-heading-split">
+    <div>
+      <p class="eyebrow">Patient charts</p>
+      <h1>Patients</h1>
+      <p class="muted">Search only within your assigned organization and role scope.</p>
+    </div>
+    {% if user.can_manage_schedule %}<a class="button" href="{% url 'patient-create' %}">+ New patient</a>{% endif %}
+  </div>
+  <section class="card">
+    <form class="search-bar" method="get">
+      <label class="sr-only" for="patient-search">Search patients</label>
+      <input id="patient-search" class="field-input" name="q" value="{{ query }}" placeholder="Search name or medical record number">
+      <button class="button button-quiet" type="submit">Search</button>
+    </form>
+    {% if patients %}
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Patient</th><th>MRN</th><th>Assigned therapist</th><th>Chart status</th><th></th></tr></thead>
+          <tbody>
+            {% for patient in patients %}
+              <tr>
+                <td><strong>{{ patient.full_name }}</strong><small>DOB {{ patient.date_of_birth|date:"M j, Y" }}</small></td>
+                <td>{{ patient.medical_record_number }}</td>
+                <td>{{ patient.assigned_therapist.get_full_name|default:"Unassigned" }}</td>
+                <td><span class="pill pill-{{ patient.status }}">{{ patient.get_status_display }}</span></td>
+                <td>
+                  {% if user.can_access_clinical %}
+                    <a href="{% url 'patient-detail' patient.id %}">Open chart</a>
+                  {% elif user.role == 'admin' or user.role == 'director' or user.role == 'biller' %}
+                    <a href="{% url 'billing-detail' patient.id %}">Open billing</a>
+                  {% else %}
+                    <span class="muted">Demographics only</span>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="empty-state">No patients match your search or access scope.</div>
+    {% endif %}
+  </section>
+{% endblock %}

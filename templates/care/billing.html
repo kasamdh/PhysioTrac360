@@ -1,0 +1,26 @@
+{% extends "care/base.html" %}
+
+{% block content %}
+  <div class="page-heading page-heading-split">
+    <div>
+      <div class="breadcrumb"><a href="{% url 'patient-list' %}">Patients</a><span>/</span> Billing</div>
+      <p class="eyebrow">Financial workflow</p>
+      <h1>Superbills & payment status</h1>
+      <p class="muted">{{ patient.full_name }} · {{ patient.medical_record_number }}. Store service codes and approved processor references only.</p>
+    </div>
+    <div class="inline-actions"><a class="button button-quiet" href="{% url 'payment-record-create' patient.id %}">Record payment</a><a class="button" href="{% url 'superbill-create' patient.id %}">+ New superbill</a></div>
+  </div>
+  <section class="card">
+    <div class="card-header"><div><p class="eyebrow">Service charges</p><h2>Superbills</h2></div></div>
+    {% if superbills %}
+      <div class="table-wrap"><table><thead><tr><th>Service date</th><th>Codes</th><th>Clinician</th><th>Amount</th><th>Status</th><th>Processor reference</th></tr></thead><tbody>{% for bill in superbills %}<tr><td>{{ bill.service_date|date:"M j, Y" }}</td><td>{% for code in bill.codes %}<span class="code-chip">{{ code }}</span>{% endfor %}</td><td>{{ bill.clinician.get_full_name|default:bill.clinician.username }}</td><td>&#36;{{ bill.amount }}</td><td><span class="pill pill-{{ bill.status }}">{{ bill.get_status_display }}</span></td><td>{{ bill.payment_processor_reference|default:"—" }}</td></tr>{% endfor %}</tbody></table></div>
+    {% else %}<div class="empty-state">No superbills have been created for this patient.</div>{% endif %}
+  </section>
+  <section class="card">
+    <div class="card-header"><div><p class="eyebrow">Tokenized payment records</p><h2>Payments</h2></div></div>
+    {% if payments %}
+      <div class="table-wrap"><table><thead><tr><th>Date</th><th>Linked superbill</th><th>Amount</th><th>Status</th><th>Processor reference</th><th>Recorded by</th></tr></thead><tbody>{% for payment in payments %}<tr><td>{{ payment.received_on|date:"M j, Y" }}</td><td>{% if payment.superbill %}{{ payment.superbill.service_date|date:"M j, Y" }}{% else %}—{% endif %}</td><td>&#36;{{ payment.amount }}</td><td><span class="pill pill-{{ payment.status }}">{{ payment.get_status_display }}</span></td><td>{{ payment.payment_processor_reference }}</td><td>{{ payment.recorded_by.get_full_name|default:payment.recorded_by.username }}</td></tr>{% endfor %}</tbody></table></div>
+    {% else %}<div class="empty-state">No payment status records have been entered.</div>{% endif %}
+  </section>
+  <p class="billing-notice">This workspace is not a payment-card vault or processor. Integrate a contracted, PCI-compliant processor and use only its token/reference here.</p>
+{% endblock %}

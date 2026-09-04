@@ -1,0 +1,99 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>PhysioTrac360 | Source Motion Physical Therapy</title>
+  <link rel="stylesheet" href="{% static 'care/app.css' %}">
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  {% if user.is_authenticated %}
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Primary navigation">
+        <a class="brand" href="{% url 'dashboard' %}">
+          {% if user.organization.logo %}
+            <img class="brand-logo" src="{{ user.organization.logo.url }}" alt="{{ user.organization.name }} logo">
+          {% else %}
+            <span class="brand-mark">{{ user.organization.initials }}</span>
+          {% endif %}
+          <span><strong>{{ user.organization.name|default:"Source Motion Physical Therapy" }}</strong><small>PhysioTrac360 clinical workspace</small></span>
+        </a>
+        <nav class="nav-list">
+          <a href="{% url 'dashboard' %}" class="{% if request.resolver_match.url_name == 'dashboard' %}active{% endif %}">
+            <span aria-hidden="true">⌂</span> Today
+          </a>
+          {% if user.can_manage_schedule %}
+            <a href="{% url 'schedule' %}" class="{% if request.resolver_match.url_name == 'schedule' %}active{% endif %}">
+              <span aria-hidden="true">◷</span> Schedule
+            </a>
+          {% endif %}
+          <a href="{% url 'patient-list' %}" class="{% if request.resolver_match.url_name == 'patient-list' %}active{% endif %}">
+            <span aria-hidden="true">◉</span> Patients
+          </a>
+          {% if user.is_platform_super_admin %}
+            <a href="{% url 'access-control' %}" class="{% if request.resolver_match.url_name == 'access-control' or request.resolver_match.url_name == 'employee-onboard' or request.resolver_match.url_name == 'access-user-create' or request.resolver_match.url_name == 'access-user-update' or request.resolver_match.url_name == 'access-password-reset' %}active{% endif %}">
+              <span aria-hidden="true">⌘</span> Client management
+            </a>
+          {% endif %}
+          {% if user.role == 'admin' %}
+            <a href="{% url 'facility-settings' %}" class="{% if request.resolver_match.url_name == 'facility-settings' %}active{% endif %}">
+              <span aria-hidden="true">◈</span> Facility settings
+            </a>
+          {% endif %}
+          {% if user.is_superuser or user.role == 'admin' or user.role == 'director' or user.role == 'compliance' %}
+            <a href="{% url 'audit-log' %}" class="{% if request.resolver_match.url_name == 'audit-log' %}active{% endif %}">
+              <span aria-hidden="true">⌁</span> Audit history
+            </a>
+          {% endif %}
+        </nav>
+        <div class="sidebar-foot">
+          <div class="privacy-card">
+            <span aria-hidden="true">▣</span>
+            <div><strong>Private workspace</strong><small>Keep this screen out of public view.</small></div>
+          </div>
+          <div class="user-card">
+            <span class="avatar">{{ user.first_name|first|default:user.username|first|upper }}</span>
+            <div><strong>{{ user.get_full_name|default:user.username }}</strong><small>{{ user.get_role_display }}</small></div>
+          </div>
+          <form method="post" action="{% url 'logout' %}">
+            {% csrf_token %}
+            <button class="text-button" type="submit">Sign out</button>
+          </form>
+        </div>
+      </aside>
+      <section class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Protected clinical workspace</p>
+            <p class="topbar-label">{{ user.organization.name|default:"Organization assignment required" }}</p>
+          </div>
+          <div class="topbar-actions">
+            {% if user.can_manage_schedule %}
+              <a class="button button-quiet" href="{% url 'appointment-create' %}">+ Schedule</a>
+            {% endif %}
+            {% if user.can_manage_schedule %}
+              <a class="button" href="{% url 'patient-create' %}">+ Patient</a>
+            {% endif %}
+          </div>
+        </header>
+        <main id="main-content" class="content">
+          {% if messages %}
+            <div class="flash-stack" aria-live="polite">
+              {% for message in messages %}
+                <div class="flash flash-{{ message.tags|default:'info' }}">{{ message }}</div>
+              {% endfor %}
+            </div>
+          {% endif %}
+          {% block content %}{% endblock %}
+        </main>
+      </section>
+    </div>
+  {% else %}
+    {% block unauthenticated_content %}{% endblock %}
+  {% endif %}
+  {% block page_scripts %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,50 @@
+{% extends "care/base.html" %}
+
+{% block content %}
+  <div class="page-heading">
+    <div>
+      <div class="breadcrumb"><a href="{% url 'patient-detail' artifact.patient.id %}">{{ artifact.patient.full_name }}</a><span>/</span> Clinical draft</div>
+      <p class="eyebrow">Source-backed draft</p>
+      <h1>{{ artifact.get_kind_display }}</h1>
+      <p class="muted">Created {{ artifact.created_at|date:"M j, Y, g:i A" }} · {{ artifact.get_status_display }}</p>
+    </div>
+  </div>
+  <div class="draft-layout">
+    <section class="card draft-content">
+      <div class="safety-callout"><strong>Therapist review required</strong><span>{{ artifact.safety_notice }}</span></div>
+      <pre class="draft-text">{{ artifact.draft_text }}</pre>
+    </section>
+    <aside class="draft-sidebar">
+      <section class="card">
+        <p class="eyebrow">Provenance</p><h2>Evidence sources</h2>
+        <p class="muted">Provider: {{ artifact.provider }} · Version: {{ artifact.model_version }}</p>
+        {% if source_notes %}
+          <ul class="compact-list">{% for note in source_notes %}<li><div><strong>{{ note.get_note_type_display }}</strong><span>{{ note.service_date|date:"M j, Y" }} · signed source</span></div></li>{% endfor %}</ul>
+        {% else %}<p class="muted">No prior signed visits were available. Add the missing clinical information manually.</p>{% endif %}
+      </section>
+      <section class="card">
+        <p class="eyebrow">Human decision</p><h2>Review controls</h2>
+        {% if artifact.status == 'draft' %}
+          <form method="post" action="{% url 'artifact-review' artifact.id %}" class="form-grid">
+            {% csrf_token %}
+            <div class="field-group"><label for="review-note">Review note (optional)</label><textarea id="review-note" class="field-input" name="review_note" rows="3" placeholder="Document review context without duplicating the full note."></textarea></div>
+            <button class="button button-wide" name="action" value="approve" type="submit">Approve draft</button>
+            <button class="button button-danger button-wide" name="action" value="reject" type="submit">Reject draft</button>
+          </form>
+        {% elif artifact.status == 'approved' %}
+          <p class="muted">Approved by {{ artifact.reviewed_by.get_full_name|default:artifact.reviewed_by.username }}. Approval does not sign or finalize a note.</p>
+          {% if artifact.kind == 'progress' or artifact.kind == 'discharge' or artifact.kind == 'handoff' %}
+            <form method="post" action="{% url 'artifact-review' artifact.id %}">{% csrf_token %}<button class="button button-wide" name="action" value="apply" type="submit">Apply to editable note</button></form>
+          {% else %}
+            <p class="safety-note">Review and copy the patient-facing text into the organization-approved delivery channel. Do not auto-send it.</p>
+          {% endif %}
+        {% elif artifact.status == 'applied' %}
+          <p class="muted">This draft was applied to an editable note and remains part of the audit trail.</p>
+          <a class="button button-wide" href="{% url 'note-edit' artifact.applied_note_id %}">Open editable note</a>
+        {% else %}
+          <p class="muted">This draft was rejected. It is retained as a review record.</p>
+        {% endif %}
+      </section>
+    </aside>
+  </div>
+{% endblock %}

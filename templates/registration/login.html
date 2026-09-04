@@ -1,0 +1,32 @@
+{% extends "care/base.html" %}
+
+{% block unauthenticated_content %}
+  <main class="login-page">
+    <section class="login-card" aria-labelledby="login-title">
+      <div class="brand brand-dark">
+        <span class="brand-mark">PT</span>
+        <span><strong>PhysioTrac360</strong><small>Source Motion Physical Therapy</small></span>
+      </div>
+      <p class="eyebrow">Secure sign-in</p>
+      <h1 id="login-title">Welcome back</h1>
+      <p class="muted">Sign in to access your assigned clinical workspace.</p>
+      {% if form.errors %}
+        <div class="flash flash-error">Your username or password was not accepted.</div>
+      {% endif %}
+      <form method="post" class="form-grid">
+        {% csrf_token %}
+        <div class="field-group">
+          <label for="{{ form.username.id_for_label }}">Username</label>
+          {{ form.username }}
+        </div>
+        <div class="field-group">
+          <label for="{{ form.password.id_for_label }}">Password</label>
+          {{ form.password }}
+        </div>
+        {% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
+        <button class="button button-wide" type="submit">Sign in securely</button>
+      </form>
+      <p class="login-notice">Production use requires MFA, encrypted transport, session controls, and organization-approved infrastructure.</p>
+    </section>
+  </main>
+{% endblock %}

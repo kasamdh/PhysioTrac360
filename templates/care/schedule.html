@@ -1,0 +1,135 @@
+{% extends "care/base.html" %}
+{% load static %}
+
+{% block content %}
+  <div class="page-heading page-heading-split">
+    <div>
+      <p class="eyebrow">Schedule · month view</p>
+      <h1>{{ calendar_month|date:"F Y" }}</h1>
+      <p class="muted">Drag a scheduled visit onto another date, or select it to choose a date. Its local start time and duration stay the same.</p>
+    </div>
+    <div class="inline-actions">
+      <a class="button button-quiet" href="{% url 'schedule' %}?month={{ previous_month|date:'Y-m' }}&amp;day={{ previous_selected_day|date:'Y-m-d' }}">&larr; Previous month</a>
+      <a class="button button-quiet" href="{% url 'schedule' %}?month={{ today|date:'Y-m' }}&amp;day={{ today|date:'Y-m-d' }}">Today</a>
+      <a class="button button-quiet" href="{% url 'schedule' %}?month={{ next_month|date:'Y-m' }}&amp;day={{ next_selected_day|date:'Y-m-d' }}">Next month &rarr;</a>
+      <a class="button" href="{% url 'appointment-create' %}">+ Schedule visit</a>
+    </div>
+  </div>
+
+  <section class="card calendar-card" aria-labelledby="calendar-title">
+    <div class="card-header">
+      <div>
+        <p class="eyebrow">Calendar</p>
+        <h2 id="calendar-title">{{ calendar_month|date:"F Y" }} appointments</h2>
+      </div>
+      <span class="calendar-key"><span class="calendar-key-dot"></span> Drag or select scheduled visits to move</span>
+    </div>
+    <div class="calendar-scroll">
+      <div class="month-calendar" role="grid" aria-label="{{ calendar_month|date:'F Y' }} appointment calendar" data-appointment-calendar>
+        <div class="calendar-weekdays" role="row">
+          <span role="columnheader">Sun</span><span role="columnheader">Mon</span><span role="columnheader">Tue</span><span role="columnheader">Wed</span><span role="columnheader">Thu</span><span role="columnheader">Fri</span><span role="columnheader">Sat</span>
+        </div>
+        {% for week in calendar_weeks %}
+          <div class="calendar-week" role="row">
+            {% for day in week %}
+              <div
+                class="calendar-day {% if not day.in_current_month %}calendar-day-outside{% endif %} {% if day.is_today %}calendar-day-today{% endif %} {% if day.is_selected %}calendar-day-selected{% endif %}"
+                role="gridcell"
+                data-calendar-date="{{ day.date|date:'Y-m-d' }}"
+                {% if day.is_selected %}aria-current="date"{% endif %}
+                aria-label="{{ day.date|date:'l, F j, Y' }}{% if day.appointments %}, {{ day.appointments|length }} scheduled appointment{{ day.appointments|pluralize }}{% endif %}"
+              >
+                <a class="calendar-day-link" href="{% url 'schedule' %}?month={{ day.date|date:'Y-m' }}&amp;day={{ day.date|date:'Y-m-d' }}" aria-label="View {{ day.date|date:'l, F j, Y' }} agenda">
+                  <span class="calendar-day-number">{{ day.date|date:"j" }}</span>
+                </a>
+                <div class="calendar-events">
+                  {% for appointment in day.appointments %}
+                    {% if appointment.status == 'scheduled' %}
+                      <button
+                        class="calendar-event calendar-event-{{ appointment.status }} calendar-event-draggable js-appointment-move"
+                        type="button"
+                        draggable="true"
+                        data-appointment-id="{{ appointment.id }}"
+                        data-move-url="{% url 'appointment-move' appointment.id %}"
+                        data-current-date="{{ day.date|date:'Y-m-d' }}"
+                        aria-label="Move appointment for {{ appointment.patient.full_name }} at {{ appointment.starts_at|time:'g:i A' }}. Drag to another date or activate to choose a date."
+                      >
+                        <time>{{ appointment.starts_at|time:"g:i" }}</time>
+                        <strong>{{ appointment.patient.full_name }}</strong>
+                      </button>
+                    {% else %}
+                      <span class="calendar-event calendar-event-{{ appointment.status }}">
+                        <time>{{ appointment.starts_at|time:"g:i" }}</time>
+                        <strong>{{ appointment.patient.full_name }}</strong>
+                      </span>
+                    {% endif %}
+                  {% endfor %}
+                  {% if day.additional_count %}<span class="calendar-more">+{{ day.additional_count }} more</span>{% endif %}
+                </div>
+              </div>
+            {% endfor %}
+          </div>
+        {% endfor %}
+      </div>
+    </div>
+  </section>
+
+  <section class="card schedule-agenda" aria-labelledby="agenda-title">
+    <div class="card-header">
+      <div>
+        <p class="eyebrow">Selected day</p>
+        <h2 id="agenda-title">{{ selected_day|date:"l, F j" }}</h2>
+      </div>
+      <span class="agenda-count">{{ appointments|length }} visit{{ appointments|pluralize }}</span>
+    </div>
+    {% if appointments %}
+      <div class="schedule-list">
+        {% for appointment in appointments %}
+          <article class="schedule-card">
+            <time><strong>{{ appointment.starts_at|time:"g:i A" }}</strong><span>{{ appointment.ends_at|time:"g:i A" }}</span></time>
+            <div class="schedule-main">
+              <div class="schedule-title"><strong>{{ appointment.patient.full_name }}</strong><span class="pill pill-{{ appointment.status }}">{{ appointment.get_status_display }}</span></div>
+              <span>{{ appointment.get_kind_display }} · {{ appointment.therapist.get_full_name|default:appointment.therapist.username }}</span>
+              <span>{% if appointment.is_home_visit %}Home visit{% else %}{{ appointment.location|default:"Location pending" }}{% endif %}</span>
+            </div>
+            <div class="appointment-actions">
+              {% if appointment.status == 'scheduled' %}
+                <button
+                  class="button button-small button-quiet js-appointment-move"
+                  type="button"
+                  data-appointment-id="{{ appointment.id }}"
+                  data-move-url="{% url 'appointment-move' appointment.id %}"
+                  data-current-date="{{ selected_day|date:'Y-m-d' }}"
+                >Move</button>
+              {% endif %}
+              {% if user.can_access_clinical %}<a class="button button-small" href="{% url 'note-create' appointment.patient_id %}">Start note</a>{% endif %}
+            </div>
+          </article>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="empty-state">No appointments scheduled for this day.</div>
+    {% endif %}
+  </section>
+
+  <dialog class="calendar-move-dialog" id="calendar-move-dialog" aria-labelledby="calendar-move-title">
+    <button class="dialog-close" type="button" data-calendar-move-cancel aria-label="Close move appointment dialog">&times;</button>
+    <p class="eyebrow">Reschedule visit</p>
+    <h2 id="calendar-move-title">Move appointment</h2>
+    <p class="muted" id="calendar-move-description">Choose a new date. The original local start time and duration will be preserved.</p>
+    <form id="calendar-move-form" method="post">
+      {% csrf_token %}
+      <label for="calendar-move-date">New appointment date</label>
+      <input class="field-input" id="calendar-move-date" name="target_date" type="date" required>
+      <div class="form-actions">
+        <button class="button button-quiet" type="button" data-calendar-move-cancel>Cancel</button>
+        <button class="button" type="submit">Move appointment</button>
+      </div>
+    </form>
+  </dialog>
+  <p class="sr-only" id="calendar-move-status" role="status" aria-live="polite"></p>
+{% endblock %}
+
+{% block page_scripts %}
+  <script src="{% static 'care/schedule.js' %}" defer></script>
+{% endblock %}
