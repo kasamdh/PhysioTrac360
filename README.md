@@ -1,4 +1,5 @@
 # PhysioTrac360
+<<<<<<< HEAD
 
 PhysioTrac360 is the clinical EMR product of Source Motion Physical Therapy.
 
@@ -171,3 +172,6 @@ The local clinical-draft composer is deliberately deterministic and stays
 inside Django. Do not enable an external LLM or transcription API until
 minimum-necessary data flow, data retention, provider controls, and contractual
 requirements have been approved.
+=======
+This is a PhysioTrac360 EMR software
+>>>>>>> b82d8ec09fd5195daac913a8d6b62dc0db3b517e
