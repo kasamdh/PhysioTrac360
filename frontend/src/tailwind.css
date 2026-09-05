@@ -1,0 +1,40 @@
+/* Tailwind utilities for pages migrated to Tailwind + shadcn/ui.
+   Preflight (Tailwind's base reset) is intentionally NOT imported here —
+   styles.css already resets box-sizing/margins for the whole app, and
+   pulling in Tailwind's full reset would restyle every page that hasn't
+   been migrated yet. Only opt a page in by using Tailwind classes on it. */
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+@theme {
+  --font-sans: Inter, "Avenir Next", Avenir, "Segoe UI", Arial, Helvetica, sans-serif;
+
+  --color-background: #ffffff;
+  --color-foreground: #1c1f23;
+
+  --color-card: #ffffff;
+  --color-card-foreground: #1c1f23;
+
+  --color-primary: #0d9488;
+  --color-primary-deep: #0f766e;
+  --color-primary-foreground: #ffffff;
+  --color-primary-soft: #ccfbf1;
+
+  --color-secondary: #eef2f1;
+  --color-secondary-foreground: #1c1f23;
+
+  --color-muted: #f1f5f6;
+  --color-muted-foreground: #707a84;
+
+  --color-accent: #ccfbf1;
+  --color-accent-foreground: #0f766e;
+
+  --color-destructive: #dc2626;
+  --color-destructive-foreground: #ffffff;
+
+  --color-border: #dce4ea;
+  --color-input: #c7d0ce;
+  --color-ring: #0d9488;
+
+  --radius: 0.625rem;
+}

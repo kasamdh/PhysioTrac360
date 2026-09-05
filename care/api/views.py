@@ -136,7 +136,19 @@ def organization_users(request):
     users = organization.users.select_related("organization").order_by("last_name", "first_name", "username")
     if request.GET.get("includeArchived", "").strip().lower() != "true":
         users = users.filter(archived_at__isnull=True)
-    return JsonResponse({"users": [serialize_client_user(user) for user in users]})
+    try:
+        page_size = min(max(int(request.GET.get("pageSize", "25")), 10), 100)
+        page = max(int(request.GET.get("page", "1")), 1)
+    except ValueError:
+        return api_error("Page and page size must be whole numbers.", status=400)
+    total = users.count()
+    records = list(users[(page - 1) * page_size : page * page_size])
+    return JsonResponse({
+        "users": [serialize_client_user(user) for user in records],
+        "total": total,
+        "page": page,
+        "pageSize": page_size,
+    })
 
 
 @require_http_methods(["GET", "PATCH", "DELETE"])

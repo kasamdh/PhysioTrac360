@@ -129,8 +129,10 @@ export const api = {
   async dashboard() {
     return request<DashboardData>("/dashboard/");
   },
-  async organizationUsers() {
-    return request<{ users: ManagedClientUser[] }>("/users/");
+  async organizationUsers(filters: Record<string, string> = {}) {
+    const params = new URLSearchParams(filters);
+    const search = params.toString() ? `?${params.toString()}` : "";
+    return request<{ users: ManagedClientUser[]; total: number; page: number; pageSize: number }>(`/users/${search}`);
   },
   async createOrganizationUser(body: Record<string, unknown>) {
     return request<{ user: ManagedClientUser }>("/users/", { method: "POST", body });
@@ -356,7 +358,7 @@ export const api = {
   async allUsers(filters: Record<string, string> = {}) {
     const params = new URLSearchParams(filters);
     const search = params.toString() ? `?${params.toString()}` : "";
-    return request<{ users: ManagedClientUser[] }>(`/super-admin/users/${search}`);
+    return request<{ users: ManagedClientUser[]; total: number; page: number; pageSize: number }>(`/super-admin/users/${search}`);
   },
   async createUser(body: Record<string, unknown>) {
     return request<{ user: ManagedClientUser }>("/super-admin/users/", { method: "POST", body });

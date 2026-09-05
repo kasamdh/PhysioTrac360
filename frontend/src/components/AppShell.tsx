@@ -27,11 +27,11 @@ const PAGE_LABELS: Record<WorkspacePage, string> = {
 };
 
 export function AppShell({ user, page, onNavigate, onLogout, children }: AppShellProps) {
+  // Super Admin reaches Clients/Users through the Administration hub (Home →
+  // Administration) plus "Go Back"/"Home" in the top bar, so the persistent
+  // tab row would just duplicate that navigation — skip it for this role.
   const navItems: { key: WorkspacePage; label: string; icon: string }[] = user.capabilities.isSuperAdmin
-    ? [
-        { key: "clients", label: "Clients", icon: "◆" },
-        { key: "users", label: "Users", icon: "◉" },
-      ]
+    ? []
     : [
         ...(user.capabilities.canManageSchedule ? [{ key: "schedule" as const, label: "Schedule", icon: "◷" }] : []),
         { key: "patients" as const, label: "Patients", icon: "◉" },

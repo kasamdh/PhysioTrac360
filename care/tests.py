@@ -1669,6 +1669,32 @@ class ClinicalWorkflowTests(TestCase):
         self.assertEqual(missing_client.status_code, 422)
         self.assertIn("clientNumber", missing_client.json()["errors"])
 
+    def test_platform_user_list_is_paginated(self):
+        platform_admin = self._platform_admin()
+        client = Organization.objects.create(name="Pagination Rehab", slug="pagination-rehab", client_number=9001)
+        for index in range(12):
+            User.objects.create_user(
+                username=f"page-user-{index}", password="safe-test-password",
+                organization=client, role=User.Role.THERAPIST,
+            )
+        self.client.force_login(platform_admin)
+
+        first_page = self.client.get(reverse("api-super-admin-users"), {"clientNumber": str(client.client_number), "pageSize": "10"})
+        self.assertEqual(first_page.status_code, 200)
+        payload = first_page.json()
+        self.assertEqual(payload["total"], 12)
+        self.assertEqual(payload["page"], 1)
+        self.assertEqual(payload["pageSize"], 10)
+        self.assertEqual(len(payload["users"]), 10)
+
+        second_page = self.client.get(
+            reverse("api-super-admin-users"), {"clientNumber": str(client.client_number), "pageSize": "10", "page": "2"}
+        )
+        self.assertEqual(len(second_page.json()["users"]), 2)
+        first_ids = {row["id"] for row in payload["users"]}
+        second_ids = {row["id"] for row in second_page.json()["users"]}
+        self.assertEqual(first_ids & second_ids, set())
+
     def test_organization_admin_can_list_and_create_users_for_their_own_org(self):
         org_admin = User.objects.create_user(
             username="org-admin",
@@ -1702,6 +1728,29 @@ class ClinicalWorkflowTests(TestCase):
         usernames = {row["username"] for row in listing.json()["users"]}
         self.assertIn("new-office-admin", usernames)
         self.assertIn("therapist", usernames)
+
+    def test_organization_user_list_is_paginated(self):
+        org_admin = User.objects.create_user(
+            username="org-admin-paginated", password="safe-test-password",
+            organization=self.organization, role=User.Role.ADMIN,
+        )
+        for index in range(12):
+            User.objects.create_user(
+                username=f"org-page-user-{index}", password="safe-test-password",
+                organization=self.organization, role=User.Role.THERAPIST,
+            )
+        self.client.force_login(org_admin)
+
+        first_page = self.client.get(reverse("api-org-users"), {"pageSize": "10"})
+        self.assertEqual(first_page.status_code, 200)
+        payload = first_page.json()
+        self.assertGreaterEqual(payload["total"], 14)  # 12 new + org_admin + self.therapist
+        self.assertEqual(payload["page"], 1)
+        self.assertEqual(payload["pageSize"], 10)
+        self.assertEqual(len(payload["users"]), 10)
+
+        second_page = self.client.get(reverse("api-org-users"), {"pageSize": "10", "page": "2"})
+        self.assertGreaterEqual(len(second_page.json()["users"]), 4)
 
     def test_organization_users_endpoint_ignores_any_client_hint_in_the_payload(self):
         other_org = Organization.objects.create(name="Other Org", slug="other-org-users")

@@ -33,6 +33,9 @@ interface OrganizationUsersPageProps {
 
 export function OrganizationUsersPage({ currentUserId }: OrganizationUsersPageProps) {
   const [users, setUsers] = useState<ManagedClientUser[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState("25");
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(emptyForm);
@@ -47,15 +50,19 @@ export function OrganizationUsersPage({ currentUserId }: OrganizationUsersPagePr
   async function load() {
     setLoading(true);
     try {
-      const result = await api.organizationUsers();
+      const result = await api.organizationUsers({ pageSize, page: String(page) });
       setUsers(result.users);
+      setTotal(result.total);
     } catch (requestError) {
       setError(requestError instanceof ApiError ? requestError.message : "Unable to load users.");
     } finally {
       setLoading(false);
     }
   }
-  useEffect(() => { void load(); }, []);
+  useEffect(() => { setPage(1); }, [pageSize]);
+  useEffect(() => { void load(); }, [pageSize, page]);
+
+  const pageCount = Math.max(1, Math.ceil(total / Number(pageSize)));
 
   async function createUser(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -92,7 +99,10 @@ export function OrganizationUsersPage({ currentUserId }: OrganizationUsersPagePr
       {error && !open && <p className="form-error" role="alert">{error}</p>}
       <section className="surface-card client-management-card">
         <div className="client-toolbar">
-          <span className="client-count">{users.length} user{users.length === 1 ? "" : "s"}</span>
+          <span className="client-count">{total} user{total === 1 ? "" : "s"}</span>
+        </div>
+        <div className="client-filter-bar">
+          <label>Per page<select value={pageSize} onChange={(event) => setPageSize(event.target.value)}><option value="10">10</option><option value="25">25</option><option value="50">50</option><option value="100">100</option></select></label>
         </div>
         {loading ? <p className="muted">Loading users...</p> : (
           <div className="table-wrap">
@@ -119,6 +129,13 @@ export function OrganizationUsersPage({ currentUserId }: OrganizationUsersPagePr
           </div>
         )}
         {!loading && !users.length && <p className="empty-copy">Your organization has no users yet.</p>}
+        {!loading && Boolean(users.length) && (
+          <div className="client-pagination">
+            <button className="secondary-button" disabled={page <= 1} onClick={() => setPage((current) => current - 1)}>Previous</button>
+            <span>Page {page} of {pageCount}</span>
+            <button className="secondary-button" disabled={page >= pageCount} onClick={() => setPage((current) => current + 1)}>Next</button>
+          </div>
+        )}
       </section>
 
       {open && (

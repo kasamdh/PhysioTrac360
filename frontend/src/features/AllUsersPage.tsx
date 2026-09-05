@@ -22,6 +22,9 @@ function openClient(clientNumber: number) {
 
 export function AllUsersPage() {
   const [users, setUsers] = useState<ManagedClientUser[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState("25");
   const [query, setQuery] = useState("");
   const [role, setRole] = useState("");
   const [status, setStatus] = useState("");
@@ -34,13 +37,17 @@ export function AllUsersPage() {
 
   async function load() {
     try {
-      const result = await api.allUsers({ q: query, role, status });
+      const result = await api.allUsers({ q: query, role, status, pageSize, page: String(page) });
       setUsers(result.users);
+      setTotal(result.total);
     } catch (requestError) {
       setError(requestError instanceof ApiError ? requestError.message : "Unable to load users.");
     }
   }
-  useEffect(() => { void load(); }, [query, role, status]);
+  useEffect(() => { setPage(1); }, [query, role, status, pageSize]);
+  useEffect(() => { void load(); }, [query, role, status, pageSize, page]);
+
+  const pageCount = Math.max(1, Math.ceil(total / Number(pageSize)));
 
   return (
     <div className="page-content">
@@ -59,11 +66,12 @@ export function AllUsersPage() {
             <span>Search users</span>
             <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Name, email, username, or client" />
           </label>
-          <span className="client-count">{users.length} user{users.length === 1 ? "" : "s"}</span>
+          <span className="client-count">{total} user{total === 1 ? "" : "s"}</span>
         </div>
         <div className="client-filter-bar">
           <label>Role<select value={role} onChange={(event) => setRole(event.target.value)}><option value="">All</option>{ROLES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
           <label>Status<select value={status} onChange={(event) => setStatus(event.target.value)}><option value="">All</option><option value="active">Active</option><option value="inactive">Inactive</option><option value="archived">Archived</option></select></label>
+          <label>Per page<select value={pageSize} onChange={(event) => setPageSize(event.target.value)}><option value="10">10</option><option value="25">25</option><option value="50">50</option><option value="100">100</option></select></label>
         </div>
         <div className="table-wrap">
           <table>
@@ -91,6 +99,11 @@ export function AllUsersPage() {
           </table>
         </div>
         {!users.length && <p className="empty-copy">No users match this search.</p>}
+        <div className="client-pagination">
+          <button className="secondary-button" disabled={page <= 1} onClick={() => setPage((current) => current - 1)}>Previous</button>
+          <span>Page {page} of {pageCount}</span>
+          <button className="secondary-button" disabled={page >= pageCount} onClick={() => setPage((current) => current + 1)}>Next</button>
+        </div>
       </section>
       {open && <CreateUserDialog onClose={() => setOpen(false)} onCreated={async () => { setOpen(false); await load(); }} />}
       {editingUser && (
