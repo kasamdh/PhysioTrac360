@@ -1,8 +1,10 @@
 import type { ReactNode } from "react";
 
 import type { WorkspaceUser } from "../api/types";
+import { AppFooter } from "./AppFooter";
+import { HomeTopBar } from "./HomeTopBar";
 
-export type WorkspacePage = "dashboard" | "schedule" | "patients" | "safety" | "clients" | "users" | "clinic-settings" | "reports";
+export type WorkspacePage = "dashboard" | "schedule" | "patients" | "safety" | "clients" | "users" | "clinic-settings" | "reports" | "admin-hub";
 
 interface AppShellProps {
   user: WorkspaceUser;
@@ -12,94 +14,55 @@ interface AppShellProps {
   children: ReactNode;
 }
 
-function orgInitials(name: string): string {
-  const words = name.split(/\s+/).filter(Boolean);
-  if (!words.length) return "PT";
-  return words.slice(0, 2).map((word) => word[0]).join("").toUpperCase();
-}
+const PAGE_LABELS: Record<WorkspacePage, string> = {
+  dashboard: "Home",
+  schedule: "Scheduling",
+  patients: "Patients",
+  safety: "Safety & Audit",
+  users: "Users",
+  "clinic-settings": "Administration",
+  reports: "Reports",
+  clients: "Clients",
+  "admin-hub": "Administration",
+};
 
 export function AppShell({ user, page, onNavigate, onLogout, children }: AppShellProps) {
-  const organizationName = user.organization?.name || "PhysioTrac360";
+  const navItems: { key: WorkspacePage; label: string; icon: string }[] = user.capabilities.isSuperAdmin
+    ? [
+        { key: "clients", label: "Clients", icon: "◆" },
+        { key: "users", label: "Users", icon: "◉" },
+      ]
+    : [
+        ...(user.capabilities.canManageSchedule ? [{ key: "schedule" as const, label: "Schedule", icon: "◷" }] : []),
+        { key: "patients" as const, label: "Patients", icon: "◉" },
+        ...(user.capabilities.canManageAccess ? [{ key: "users" as const, label: "Users", icon: "◈" }] : []),
+        ...(user.capabilities.canReviewAudit ? [{ key: "safety" as const, label: "Safety", icon: "S" }] : []),
+        ...(user.role === "admin"
+          ? [
+              { key: "clinic-settings" as const, label: "Clinic settings", icon: "⚙" },
+              { key: "reports" as const, label: "Reports", icon: "▤" },
+            ]
+          : []),
+      ];
 
   return (
-    <div className="workspace-shell">
-      <aside className="workspace-sidebar" aria-label="Primary navigation">
-        <div className="workspace-brand">
-          {user.organization?.logoUrl ? (
-            <img src={user.organization.logoUrl} alt={`${organizationName} logo`} />
-          ) : (
-            <span className="workspace-brand-mark">{orgInitials(organizationName)}</span>
-          )}
-          <span>
-            <strong>{organizationName}</strong>
-            <small>All-in-one practice workspace</small>
-          </span>
-        </div>
-
-        <nav className="workspace-nav">
-          {user.capabilities.isSuperAdmin && (
-            <>
-              <button className={page === "clients" ? "active" : ""} onClick={() => onNavigate("clients")}>
-                <span aria-hidden="true">◆</span> Clients
-              </button>
-              <button className={page === "users" ? "active" : ""} onClick={() => onNavigate("users")}>
-                <span aria-hidden="true">◉</span> Users
-              </button>
-            </>
-          )}
-          {!user.capabilities.isSuperAdmin && (
-            <>
-          <button className={page === "dashboard" ? "active" : ""} onClick={() => onNavigate("dashboard")}>
-            <span aria-hidden="true">⌂</span> Today
-          </button>
-          {user.capabilities.canManageSchedule && (
-            <button className={page === "schedule" ? "active" : ""} onClick={() => onNavigate("schedule")}>
-              <span aria-hidden="true">◷</span> Schedule
+    <div className="app-shell-flat">
+      <HomeTopBar user={user} onLogout={onLogout} onHome={() => onNavigate("dashboard")} pageLabel={PAGE_LABELS[page]} />
+      {navItems.length > 0 && (
+        <nav className="app-menu-bar" aria-label="Primary navigation">
+          {navItems.map((item) => (
+            <button
+              key={item.key}
+              className={page === item.key ? "active" : ""}
+              onClick={() => onNavigate(item.key)}
+            >
+              <span aria-hidden="true">{item.icon}</span> {item.label}
             </button>
-          )}
-          <button className={page === "patients" ? "active" : ""} onClick={() => onNavigate("patients")}>
-            <span aria-hidden="true">◉</span> Patients
-          </button>
-          {user.capabilities.canManageAccess && (
-            <button className={page === "users" ? "active" : ""} onClick={() => onNavigate("users")}>
-              <span aria-hidden="true">◈</span> Users
-            </button>
-          )}
-          {user.capabilities.canReviewAudit && (
-            <button className={page === "safety" ? "active" : ""} onClick={() => onNavigate("safety")}>
-              <span aria-hidden="true">S</span> Safety
-            </button>
-          )}
-          {user.role === "admin" && (
-            <>
-              <button className={page === "clinic-settings" ? "active" : ""} onClick={() => onNavigate("clinic-settings")}>
-                <span aria-hidden="true">⚙</span> Clinic settings
-              </button>
-              <button className={page === "reports" ? "active" : ""} onClick={() => onNavigate("reports")}>
-                <span aria-hidden="true">▤</span> Reports
-              </button>
-            </>
-          )}
-            </>
-          )}
+          ))}
         </nav>
-
-        <div className="workspace-sidebar-footer">
-          <div className="workspace-privacy">
-            <span aria-hidden="true">▣</span>
-            <span>Private workspace. Keep this screen out of public view.</span>
-          </div>
-          <div className="workspace-user">
-            <span className="workspace-avatar">{user.displayName.slice(0, 1).toUpperCase()}</span>
-            <span>
-              <strong>{user.displayName}</strong>
-              <small>{user.roleLabel}</small>
-            </span>
-          </div>
-          <button className="workspace-signout" onClick={onLogout}>Sign out</button>
-        </div>
-      </aside>
-      <main className="workspace-main">{children}</main>
+      )}
+      <main className="app-main">{children}</main>
+      <AppFooter />
     </div>
   );
 }

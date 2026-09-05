@@ -15,6 +15,7 @@ urlpatterns = [
     path("auth/facility/", views.facility, name="api-facility"),
     path("auth/login/", views.login, name="api-login"),
     path("auth/logout/", views.logout, name="api-logout"),
+    path("auth/change-password/", views.change_password, name="api-change-password"),
     path("auth/me/", views.me, name="api-me"),
     path("dashboard/", views.dashboard, name="api-dashboard"),
     path("users/", views.organization_users, name="api-org-users"),

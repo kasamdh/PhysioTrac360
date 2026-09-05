@@ -4,7 +4,7 @@ from __future__ import annotations
 import calendar
 from datetime import datetime, timedelta
 
-from django.contrib.auth import authenticate, login as auth_login, logout as auth_logout
+from django.contrib.auth import authenticate, login as auth_login, logout as auth_logout, update_session_auth_hash
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db.models import Q
 from django.http import JsonResponse
@@ -78,6 +78,30 @@ def login(request):
 def logout(request):
     auth_logout(request)
     return JsonResponse({"detail": "Signed out."})
+
+
+@require_POST
+@api_login_required
+def change_password(request):
+    """Self-service password change for the signed-in user (any role)."""
+    try:
+        payload = json_body(request)
+    except InvalidJSON as exc:
+        return api_error(str(exc), status=400)
+    current_password = payload.get("currentPassword", "")
+    new_password = payload.get("newPassword", "")
+    if not isinstance(current_password, str) or not request.user.check_password(current_password):
+        return api_error("Current password is incorrect.", status=400)
+    if not isinstance(new_password, str) or len(new_password) < 12:
+        return api_error("Choose a new password with at least 12 characters.", status=400)
+    request.user.set_password(new_password)
+    request.user.save(update_fields=["password"])
+    update_session_auth_hash(request, request.user)
+    if request.user.organization_id:
+        # Platform super admins have no organization, and audit events are
+        # always organization-scoped, so there is nowhere to log this for them.
+        record_audit_event(actor=request.user, action="user.password_changed", obj=request.user, request=request)
+    return JsonResponse({"detail": "Password updated."})
 
 
 @require_GET

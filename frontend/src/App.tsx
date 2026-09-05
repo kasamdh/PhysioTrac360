@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { ApiError, api } from "./api/client";
 import type { WorkspaceUser } from "./api/types";
 import { ActivateInvitationPage } from "./features/ActivateInvitationPage";
+import { AdminHomePage } from "./features/AdminHomePage";
 import { AllUsersPage } from "./features/AllUsersPage";
 import { AppShell, type WorkspacePage } from "./components/AppShell";
 import { ClientDetailPage } from "./features/ClientDetailPage";
@@ -16,12 +17,16 @@ import { PublicBookingPage } from "./features/PublicBookingPage";
 import { ReportsPage } from "./features/ReportsPage";
 import { SchedulePage } from "./features/SchedulePage";
 import { SafetyPage } from "./features/SafetyPage";
+import { SuperAdminAdministrationPage } from "./features/SuperAdminAdministrationPage";
+import { SuperAdminHomePage } from "./features/SuperAdminHomePage";
 
 const TENANT_PAGES: WorkspacePage[] = ["schedule", "patients", "safety", "users", "clinic-settings", "reports"];
 
 function pageFromHash(): WorkspacePage {
   const value = window.location.hash.replace("#", "").split("/")[0];
-  return (TENANT_PAGES as string[]).includes(value) || value === "clients" ? (value as WorkspacePage) : "dashboard";
+  return (TENANT_PAGES as string[]).includes(value) || value === "clients" || value === "admin-hub"
+    ? (value as WorkspacePage)
+    : "dashboard";
 }
 
 function invitationTokenFromLocation(): string | null {
@@ -114,7 +119,7 @@ export default function App() {
   }
 
   const visiblePage = user.capabilities.isSuperAdmin
-    ? (page === "users" ? "users" : "clients")
+    ? (["users", "clients", "dashboard", "admin-hub"].includes(page) ? page : "dashboard")
     : page === "schedule" && !user.capabilities.canManageSchedule
       ? "dashboard"
       : page === "safety" && !user.capabilities.canReviewAudit
@@ -126,6 +131,20 @@ export default function App() {
             : page === "clients"
               ? "dashboard"
               : page;
+
+  // The Home landing page (Super Admin and org-admin) is a standalone,
+  // sidebar-free page — like the login screen — not a page inside AppShell.
+  // Every other page keeps the persistent sidebar shell.
+  if (visiblePage === "dashboard" && user.capabilities.isSuperAdmin) {
+    return <SuperAdminHomePage user={user} onNavigate={navigate} onLogout={() => void logout()} />;
+  }
+  if (visiblePage === "admin-hub" && user.capabilities.isSuperAdmin) {
+    return <SuperAdminAdministrationPage user={user} onNavigate={navigate} onLogout={() => void logout()} />;
+  }
+  if (visiblePage === "dashboard" && user.role === "admin") {
+    return <AdminHomePage user={user} onNavigate={navigate} onLogout={() => void logout()} />;
+  }
+
   return <AppShell user={user} page={visiblePage} onNavigate={navigate} onLogout={() => void logout()}>
     {visiblePage === "dashboard" && <DashboardPage />}
     {visiblePage === "patients" && <PatientsPage user={user} />}

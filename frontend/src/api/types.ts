@@ -120,10 +120,12 @@ export interface WorkspaceUser {
   displayName: string;
   role: string;
   roleLabel: string;
+  lastLogin: string | null;
   organization: {
     id: string;
     name: string;
     logoUrl: string | null;
+    timezone: string;
   } | null;
   capabilities: Capabilities;
 }

@@ -219,6 +219,80 @@ class ProviderLocationFoundationTests(TestCase):
         self.assertNotIn(other_provider, form.fields["provider"].queryset)
         self.assertNotIn(other_location, form.fields["location_detail"].queryset)
 
+    def test_therapist_cannot_be_double_booked_at_the_model_level(self):
+        therapist = User.objects.create_user(
+            username="double-book-therapist",
+            password="safe-test-password",
+            organization=self.organization,
+            role=User.Role.THERAPIST,
+        )
+        first_patient = Patient.objects.create(
+            organization=self.organization, first_name="First", last_name="Patient", date_of_birth="1980-01-01"
+        )
+        second_patient = Patient.objects.create(
+            organization=self.organization, first_name="Second", last_name="Patient", date_of_birth="1982-02-02"
+        )
+        starts_at = timezone.make_aware(datetime(2026, 7, 6, 9, 0))
+        Appointment.objects.create(
+            patient=first_patient, therapist=therapist, starts_at=starts_at,
+            ends_at=starts_at + timedelta(minutes=45), created_by=therapist,
+        )
+
+        overlapping = Appointment(
+            patient=second_patient, therapist=therapist, starts_at=starts_at + timedelta(minutes=15),
+            ends_at=starts_at + timedelta(minutes=60), created_by=therapist,
+        )
+        with self.assertRaisesMessage(
+            ValidationError, "This therapist already has an appointment during this time."
+        ):
+            overlapping.full_clean()
+
+        # A different, non-overlapping time for the same therapist is unaffected.
+        later = Appointment(
+            patient=second_patient, therapist=therapist, starts_at=starts_at + timedelta(hours=2),
+            ends_at=starts_at + timedelta(hours=2, minutes=45), created_by=therapist,
+        )
+        later.full_clean()
+
+        # Cancelling the first appointment frees the slot for a new one.
+        cancelled_conflict = Appointment.objects.get(patient=first_patient)
+        cancelled_conflict.status = Appointment.Status.CANCELLED
+        cancelled_conflict.full_clean()
+        cancelled_conflict.save()
+        overlapping.full_clean()
+
+    def test_legacy_appointment_create_view_rejects_double_booking(self):
+        scheduler = User.objects.create_user(
+            username="legacy-scheduler", password="safe-test-password",
+            organization=self.organization, role=User.Role.SCHEDULER,
+        )
+        therapist = User.objects.create_user(
+            username="legacy-therapist", password="safe-test-password",
+            organization=self.organization, role=User.Role.THERAPIST,
+        )
+        first_patient = Patient.objects.create(
+            organization=self.organization, first_name="Legacy", last_name="First", date_of_birth="1975-03-03"
+        )
+        second_patient = Patient.objects.create(
+            organization=self.organization, first_name="Legacy", last_name="Second", date_of_birth="1979-04-04"
+        )
+        self.client.force_login(scheduler)
+
+        first_response = self.client.post(reverse("appointment-create"), data={
+            "patient": str(first_patient.pk), "therapist": str(therapist.pk), "kind": Appointment.Kind.FOLLOW_UP,
+            "status": Appointment.Status.SCHEDULED, "starts_at": "2026-07-06T09:00", "ends_at": "2026-07-06T09:45",
+        })
+        self.assertEqual(first_response.status_code, 302)
+        self.assertTrue(Appointment.objects.filter(patient=first_patient).exists())
+
+        second_response = self.client.post(reverse("appointment-create"), data={
+            "patient": str(second_patient.pk), "therapist": str(therapist.pk), "kind": Appointment.Kind.FOLLOW_UP,
+            "status": Appointment.Status.SCHEDULED, "starts_at": "2026-07-06T09:15", "ends_at": "2026-07-06T10:00",
+        })
+        self.assertEqual(second_response.status_code, 200)
+        self.assertFalse(Appointment.objects.filter(patient=second_patient).exists())
+        self.assertContains(second_response, "already has an appointment during this time")
+
 
 class ClinicalWorkflowTests(TestCase):
     def setUp(self):
@@ -2890,3 +2964,71 @@ class PublicBookingTests(TestCase):
         self.config.save()
         slots = self._slots_for_provider(self._availability())
         self.assertEqual(slots, [])
+
+
+class ChangePasswordTests(TestCase):
+    def setUp(self):
+        self.organization = Organization.objects.create(name="Change Password Clinic", slug="change-password-clinic")
+        self.user = User.objects.create_user(
+            username="pw-change-user", password="OriginalPass1234",
+            organization=self.organization, role=User.Role.THERAPIST,
+        )
+        self.super_admin = User.objects.create_user(
+            username="pw-change-super", password="OriginalSuperPass1234",
+            role=User.Role.SUPER_ADMIN, is_superuser=True, is_staff=True, organization=None,
+        )
+
+    def test_user_can_change_their_own_password(self):
+        self.client.force_login(self.user)
+        response = self.client.post(
+            reverse("api-change-password"),
+            data=json.dumps({"currentPassword": "OriginalPass1234", "newPassword": "BrandNewPass5678"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password("BrandNewPass5678"))
+        self.assertTrue(
+            AuditEvent.objects.filter(organization=self.organization, action="user.password_changed").exists()
+        )
+
+    def test_change_password_rejects_wrong_current_password(self):
+        self.client.force_login(self.user)
+        response = self.client.post(
+            reverse("api-change-password"),
+            data=json.dumps({"currentPassword": "wrong-password", "newPassword": "BrandNewPass5678"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password("OriginalPass1234"))
+
+    def test_change_password_rejects_short_new_password(self):
+        self.client.force_login(self.user)
+        response = self.client.post(
+            reverse("api-change-password"),
+            data=json.dumps({"currentPassword": "OriginalPass1234", "newPassword": "short"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password("OriginalPass1234"))
+
+    def test_super_admin_can_change_password_without_an_organization(self):
+        self.client.force_login(self.super_admin)
+        response = self.client.post(
+            reverse("api-change-password"),
+            data=json.dumps({"currentPassword": "OriginalSuperPass1234", "newPassword": "BrandNewSuperPass5678"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.super_admin.refresh_from_db()
+        self.assertTrue(self.super_admin.check_password("BrandNewSuperPass5678"))
+
+    def test_change_password_requires_authentication(self):
+        response = self.client.post(
+            reverse("api-change-password"),
+            data=json.dumps({"currentPassword": "x", "newPassword": "BrandNewPass5678"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 401)

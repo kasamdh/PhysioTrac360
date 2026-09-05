@@ -918,6 +918,26 @@ class Appointment(UUIDTimeStampedModel):
             errors["provider"] = "Provider does not match the assigned therapist's user profile."
         if self.appointment_type_id and self.patient_id and self.appointment_type.organization_id != self.patient.organization_id:
             errors["appointment_type"] = "Appointment type must belong to the patient's organization."
+        if (
+            self.therapist_id
+            and self.starts_at
+            and self.ends_at
+            and self.ends_at > self.starts_at
+            and self.status not in (self.Status.CANCELLED, self.Status.NO_SHOW)
+        ):
+            # Model-level backstop against double-booking a therapist — the primary,
+            # concurrency-safe defense is each creation path's own select_for_update()
+            # check (see care/api/workflow_views.py, care/views.py, care/booking.py),
+            # but this also protects callers that bypass those (e.g. Django admin).
+            conflicts = Appointment.objects.filter(
+                therapist_id=self.therapist_id,
+                starts_at__lt=self.ends_at,
+                ends_at__gt=self.starts_at,
+            ).exclude(status__in=[self.Status.CANCELLED, self.Status.NO_SHOW])
+            if self.pk:
+                conflicts = conflicts.exclude(pk=self.pk)
+            if conflicts.exists():
+                errors["starts_at"] = "This therapist already has an appointment during this time."
         if errors:
             raise ValidationError(errors)
 

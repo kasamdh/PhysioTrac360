@@ -434,8 +434,24 @@ def appointment_create(request: HttpRequest) -> HttpResponse:
     if request.method == "POST" and form.is_valid():
         appointment = form.save(commit=False)
         appointment.created_by = request.user
-        appointment.full_clean()
-        appointment.save()
+        with transaction.atomic():
+            therapist_conflict = (
+                Appointment.objects.select_for_update()
+                .filter(
+                    therapist=appointment.therapist,
+                    starts_at__lt=appointment.ends_at,
+                    ends_at__gt=appointment.starts_at,
+                )
+                .exclude(status__in=[Appointment.Status.CANCELLED, Appointment.Status.NO_SHOW])
+                .exists()
+            )
+            if therapist_conflict:
+                form.add_error(None, "The assigned clinician already has an appointment at that time.")
+                return render(
+                    request, "care/form_page.html", {"form": form, "title": "Schedule appointment"}
+                )
+            appointment.full_clean()
+            appointment.save()
         record_audit_event(
             actor=request.user,
             action="appointment.created",

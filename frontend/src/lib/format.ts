@@ -16,6 +16,17 @@ export function formatTime(value: string) {
   }).format(new Date(value));
 }
 
+export function formatDateTime(value: string, timeZone = "America/New_York") {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    month: "numeric",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(value));
+}
+
 export function monthLabel(month: string) {
   return new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",

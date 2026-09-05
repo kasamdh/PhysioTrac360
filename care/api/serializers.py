@@ -16,11 +16,13 @@ def serialize_user(user) -> dict:
         "displayName": _display_name(user),
         "role": user.role,
         "roleLabel": user.get_role_display(),
+        "lastLogin": user.last_login.isoformat() if user.last_login else None,
         "organization": (
             {
                 "id": str(organization.pk),
                 "name": organization.name,
                 "logoUrl": organization.logo.url if organization.logo else None,
+                "timezone": organization.timezone,
             }
             if organization
             else None

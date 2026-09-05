@@ -116,6 +116,12 @@ export const api = {
     await request("/auth/logout/", { method: "POST" });
     csrfToken = null;
   },
+  async changePassword(currentPassword: string, newPassword: string) {
+    return request<{ detail: string }>("/auth/change-password/", {
+      method: "POST",
+      body: { currentPassword, newPassword },
+    });
+  },
   async me() {
     const payload = await request<{ user: WorkspaceUser }>("/auth/me/");
     return payload.user;

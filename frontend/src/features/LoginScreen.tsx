@@ -37,79 +37,100 @@ export function LoginScreen({ onAuthenticated }: LoginScreenProps) {
     }
   }
 
+  const showFacilityBox = Boolean(portalSlug) && portalSlug !== "app";
+
   return (
-    <main className="login-layout">
-      <section className="login-card" aria-labelledby="login-title">
-        <div className="login-visual">
-          <div className="login-brand-row">
-            <div className="login-mark" aria-hidden="true">SM</div>
-            <div className="login-brand-copy">
-              <span>{facilityName}</span>
-              <small>Complete practice operations</small>
-            </div>
-          </div>
+    <main className="signin-shell">
+      <header className="signin-topbar">
+        <span className="signin-topbar-mark" aria-hidden="true">PT</span>
+        <strong className="signin-topbar-word">
+          PhysioTrac<em>360</em>
+        </strong>
+      </header>
 
-          <div className="login-visual-content">
-            <p className="eyebrow">Operations overview</p>
-            <h2>Built for faster, clearer care workflows.</h2>
-            <p>
-              Documentation, scheduling, patient payments, billing, and secure communication in one workspace.
-            </p>
+      <div className="signin-body">
+        <div className="signin-hero">
+          <div className="signin-hero-mark" aria-hidden="true">
+            <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path
+                d="M6 34h9l5-14 9 28 8-20 5 6h16"
+                stroke="currentColor"
+                strokeWidth="4.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
           </div>
-
-          <div className="login-stats">
-            <div>
-              <strong>1.8k</strong>
-              <span>Visits this month</span>
-            </div>
-            <div>
-              <strong>96%</strong>
-              <span>Documentation completion</span>
-            </div>
+          <div className="signin-hero-word">
+            PhysioTrac<span>360</span>
           </div>
+          <p className="signin-hero-tag">Complete practice operations</p>
         </div>
 
-        <div className="login-form-panel">
-          <p className="login-kicker">{facilityName}</p>
-          <h1 id="login-title">Welcome back</h1>
-          <p className="login-intro">One secure place to run your practice and keep care moving.</p>
-
-          <form onSubmit={handleSubmit} className="login-form">
-            <label className="field-label">
-              <span>Username</span>
-              <input
-                value={username}
-                onChange={(event) => setUsername(event.target.value)}
-                autoComplete="username"
-                aria-invalid={Boolean(error)}
-                required
-              />
-            </label>
-
-            <label className="field-label">
-              <span>Password</span>
-              <input
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-                type="password"
-                autoComplete="current-password"
-                required
-              />
-            </label>
-
-            {error && <p className="form-error" role="alert">{error}</p>}
-
-            <button className="primary-button" type="submit" disabled={submitting}>
-              {submitting ? "Signing in…" : "Continue"}
-            </button>
-          </form>
-
-          <p className="privacy-copy">
-            This is a private clinical workspace. Contact your administrator with questions
-            about the Privacy Policy or Terms of Service.
+        <div className="signin-panel">
+          <p className="signin-panel-brand" id="login-title">
+            PhysioTrac<em>360</em>
           </p>
+          <section className="signin-card" aria-labelledby="login-title">
+            {error && (
+              <p className="signin-banner signin-banner-error" role="alert">
+                {error}
+              </p>
+            )}
+
+            {showFacilityBox && (
+              <div>
+                <span className="signin-label" id="signin-org-label">
+                  Organization
+                </span>
+                <div className="signin-field-box" role="note" aria-labelledby="signin-org-label">
+                  {facilityName}
+                </div>
+              </div>
+            )}
+
+            <form onSubmit={handleSubmit} className="signin-form">
+              <div>
+                <label className="signin-label" htmlFor="signin-username">
+                  Login User Id
+                </label>
+                <input
+                  id="signin-username"
+                  value={username}
+                  onChange={(event) => setUsername(event.target.value)}
+                  placeholder="Enter your user ID"
+                  autoComplete="username"
+                  aria-invalid={Boolean(error)}
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="signin-label" htmlFor="signin-password">
+                  Login Password
+                </label>
+                <input
+                  id="signin-password"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  type="password"
+                  placeholder="Enter your password"
+                  autoComplete="current-password"
+                  required
+                />
+              </div>
+
+              <button className="signin-button" type="submit" disabled={submitting}>
+                {submitting ? "Signing in…" : "Login"}
+              </button>
+            </form>
+          </section>
         </div>
-      </section>
+      </div>
+
+      <footer className="signin-footer">
+        PhysioTrac360 &copy; {new Date().getFullYear()} PhysioTrac360, Inc. All rights reserved. Confidential.
+      </footer>
     </main>
   );
 }
