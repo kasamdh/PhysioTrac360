@@ -3,9 +3,31 @@ from __future__ import annotations
 
 from django.utils import timezone
 
+from ..services import note_compliance_findings
+
 
 def _display_name(user) -> str:
     return user.get_full_name() or user.username
+
+
+def serialize_user_license(license) -> dict:
+    return {
+        "id": str(license.pk),
+        "licenseNumber": license.license_number,
+        "issuingState": license.issuing_state,
+        "licenseType": license.license_type,
+        "issueDate": license.issue_date.isoformat() if license.issue_date else None,
+        "expiresAt": license.expires_at.isoformat(),
+        "verificationStatus": license.verification_status,
+        "verifiedAt": license.verified_at.isoformat() if license.verified_at else None,
+        "verifiedByName": _display_name(license.verified_by) if license.verified_by else None,
+        "verificationNotes": license.verification_notes,
+        "hasDocument": bool(license.document),
+        "documentFilename": license.document_original_filename,
+        "alertTier": license.alert_tier,
+        "colorBucket": license.color_bucket,
+        "daysRemaining": license.days_remaining,
+    }
 
 
 def serialize_user(user) -> dict:
@@ -17,6 +39,7 @@ def serialize_user(user) -> dict:
         "role": user.role,
         "roleLabel": user.get_role_display(),
         "lastLogin": user.last_login.isoformat() if user.last_login else None,
+        "mustChangePassword": user.must_change_password,
         "organization": (
             {
                 "id": str(organization.pk),
@@ -32,6 +55,8 @@ def serialize_user(user) -> dict:
             "canAccessClinical": user.can_access_clinical,
             "canManageSchedule": user.can_manage_schedule,
             "canSignNotes": user.can_sign_notes,
+            "canCosignNotes": user.role in {user.Role.ADMIN, user.Role.DIRECTOR}
+            or (user.role == user.Role.THERAPIST and user.can_sign_notes),
             "canManageAccess": user.is_platform_super_admin or user.role == user.Role.ADMIN,
             "canManageOperations": user.role
             in {
@@ -130,7 +155,74 @@ def serialize_note_summary(note) -> dict:
         "statusLabel": note.get_status_display(),
         "serviceDate": note.service_date.isoformat(),
         "reassessmentDue": note.reassessment_due.isoformat() if note.reassessment_due else None,
+        "updatedAt": note.updated_at.isoformat(),
+        "therapistId": str(note.therapist_id),
+        "therapistName": _display_name(note.therapist),
+        "appointmentId": str(note.appointment_id) if note.appointment_id else None,
+        "cosignRequired": note.cosign_required,
     }
+
+
+def serialize_compliance_finding(finding) -> dict:
+    return {
+        "code": finding.code,
+        "severity": finding.severity,
+        "title": finding.title,
+        "detail": finding.detail,
+        "finalizationBlocker": finding.finalization_blocker,
+    }
+
+
+def serialize_intervention(item) -> dict:
+    return {
+        "id": str(item.pk),
+        "description": item.description,
+        "bodyRegion": item.body_region,
+        "minutes": item.minutes,
+        "units": item.units,
+        "isTimed": item.is_timed,
+        "patientResponse": item.patient_response,
+        "order": item.order,
+    }
+
+
+def serialize_addendum(addendum) -> dict:
+    return {
+        "id": str(addendum.pk),
+        "author": _display_name(addendum.author),
+        "reason": addendum.reason,
+        "body": addendum.body,
+        "createdAt": addendum.created_at.isoformat(),
+    }
+
+
+def serialize_note_detail(note) -> dict:
+    payload = serialize_note_summary(note)
+    payload.update({
+        "diagnosisSnapshot": note.diagnosis_snapshot,
+        "precautionsSnapshot": note.precautions_snapshot,
+        "subjective": note.subjective,
+        "objective": note.objective,
+        "interventions": note.interventions,
+        "assessment": note.assessment,
+        "plan": note.plan,
+        "subjectiveDetails": note.subjective_details,
+        "objectiveMeasurements": note.objective_measurements,
+        "dischargeDetails": note.discharge_details,
+        "planOfCareStart": note.plan_of_care_start.isoformat() if note.plan_of_care_start else None,
+        "planOfCareEnd": note.plan_of_care_end.isoformat() if note.plan_of_care_end else None,
+        "frequencyPerWeek": note.frequency_per_week,
+        "durationWeeks": note.duration_weeks,
+        "signatureName": note.signature_name,
+        "signedAt": note.signed_at.isoformat() if note.signed_at else None,
+        "finalizationAttestation": note.finalization_attestation,
+        "cosignedBy": _display_name(note.cosigned_by) if note.cosigned_by_id else None,
+        "cosignedAt": note.cosigned_at.isoformat() if note.cosigned_at else None,
+        "interventionItems": [serialize_intervention(item) for item in note.intervention_items.all()],
+        "addenda": [serialize_addendum(addendum) for addendum in note.addenda.all()],
+        "complianceFindings": [serialize_compliance_finding(f) for f in note_compliance_findings(note)],
+    })
+    return payload
 
 
 def serialize_goal(goal, *, include_clinical_details: bool = False) -> dict:

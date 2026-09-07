@@ -27,7 +27,7 @@ export function ChangePasswordDialog({ onClose }: ChangePasswordDialogProps) {
     }
     setBusy(true);
     try {
-      await api.changePassword(currentPassword, newPassword);
+      await api.changePassword({ currentPassword, newPassword, confirmPassword });
       setSuccess(true);
     } catch (requestError) {
       setError(requestError instanceof ApiError ? requestError.message : "Unable to change your password.");

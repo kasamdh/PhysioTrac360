@@ -28,6 +28,7 @@ from .access import (
     require_patient_access,
     require_role,
 )
+from . import note_management
 from .forms import (
     AccessPasswordResetForm,
     AccessUserCreateForm,
@@ -167,18 +168,9 @@ def _clinical_access(user):
     organization_required(user)
 
 
-def _can_finalize_for(user, note: ClinicalNote) -> bool:
-    if user.role in {User.Role.ADMIN, User.Role.DIRECTOR}:
-        return True
-    return user.can_sign_notes and note.therapist_id == user.id
-
-
-def _can_edit_note(user, note: ClinicalNote) -> bool:
-    if note.is_signed:
-        return False
-    if user.role in {User.Role.ADMIN, User.Role.DIRECTOR}:
-        return True
-    return note.therapist_id == user.id
+# Permission predicates and sign/addendum mutation logic live in
+# `note_management.py`, shared with the React API (`care/api/note_views.py`)
+# so both surfaces enforce identical rules.
 
 
 @login_required
@@ -634,6 +626,8 @@ def note_create(request: HttpRequest, patient_id: str) -> HttpResponse:
         note = form.save(commit=False)
         note.patient = patient
         note.therapist = request.user
+        if request.user.role == User.Role.ASSISTANT:
+            note.cosign_required = patient.organization.pta_cosign_required
         note.full_clean()
         note.save()
         if voice_capture:
@@ -691,7 +685,7 @@ def note_edit(request: HttpRequest, note_id: str) -> HttpResponse:
                 "compliance_findings": [],
             },
         )
-    if not _can_edit_note(request.user, note):
+    if not note_management.can_edit_note(request.user, note):
         raise PermissionDenied("Signed notes are locked or this note belongs to another clinician.")
     form = ClinicalNoteForm(request.POST or None, instance=note, patient=note.patient)
     if request.method == "POST" and form.is_valid():
@@ -732,37 +726,21 @@ def note_sign(request: HttpRequest, note_id: str) -> HttpResponse:
     note = get_object_or_404(ClinicalNote.objects.select_related("patient", "therapist"), pk=note_id)
     _clinical_access(request.user)
     require_patient_access(request, note.patient)
-    if not _can_finalize_for(request.user, note):
+    if not note_management.can_finalize_note(request.user, note):
         raise PermissionDenied("Only the treating therapist or an authorized director may finalize this note.")
-    if request.POST.get("attestation") != "confirmed":
-        messages.error(
-            request,
-            "Confirm therapist review and attestation before finalizing this note.",
-        )
-        return redirect("note-edit", note_id=note.pk)
-    findings = note_compliance_findings(note)
-    blockers = [finding for finding in findings if finding.finalization_blocker]
-    if blockers:
-        messages.error(
-            request,
-            "Note cannot be finalized until required documentation checks are resolved.",
-        )
-        return redirect("note-edit", note_id=note.pk)
-    note.signature_name = request.user.get_full_name() or request.user.username
-    note.signed_at = timezone.now()
-    note.finalization_attestation = True
-    note.status = ClinicalNote.Status.SIGNED
-    note.full_clean()
-    note.save()
-    record_audit_event(
-        actor=request.user,
-        action="note.signed",
-        obj=note,
-        patient=note.patient,
+    _, errors, status_code = note_management.sign_note(
+        note=note,
+        user=request.user,
+        attestation_confirmed=request.POST.get("attestation") == "confirmed",
         request=request,
-        metadata={"note_type": note.note_type},
     )
-    messages.success(request, "Note finalized and locked. Use an addendum for later corrections.")
+    if errors:
+        messages.error(request, errors.get("status") or errors.get("attestation") or "Unable to finalize this note.")
+        return redirect("note-edit", note_id=note.pk)
+    if note.status == ClinicalNote.Status.REVIEW_REQUIRED:
+        messages.success(request, "Note signed and sent for required cosignature.")
+    else:
+        messages.success(request, "Note finalized and locked. Use an addendum for later corrections.")
     return redirect("patient-detail", patient_id=note.patient_id)
 
 
@@ -777,26 +755,21 @@ def note_addendum_create(request: HttpRequest, note_id: str) -> HttpResponse:
     require_patient_access(request, note.patient)
     if not note.is_signed:
         raise PermissionDenied("An addendum can only be created for a signed note.")
-    if not _can_finalize_for(request.user, note):
+    if not note_management.can_create_addendum(request.user, note):
         raise PermissionDenied("Only an authorized therapist can create this addendum.")
     form = NoteAddendumForm(
         request.POST or None,
         instance=NoteAddendum(note=note, author=request.user),
     )
     if request.method == "POST" and form.is_valid():
-        addendum = form.save(commit=False)
-        addendum.note = note
-        addendum.author = request.user
-        addendum.full_clean()
-        addendum.save()
-        record_audit_event(
-            actor=request.user,
-            action="note.addendum_created",
-            obj=addendum,
-            patient=note.patient,
+        _, errors, _status_code = note_management.create_addendum(
+            note=note, user=request.user,
+            reason=form.cleaned_data["reason"], body=form.cleaned_data["body"],
             request=request,
-            metadata={"note_id": str(note.pk)},
         )
+        if errors:
+            messages.error(request, errors.get("status") or "Unable to save this addendum.")
+            return redirect("note-edit", note_id=note.pk)
         messages.success(request, "Addendum saved without changing the signed original.")
         return redirect("note-edit", note_id=note.pk)
     return render(

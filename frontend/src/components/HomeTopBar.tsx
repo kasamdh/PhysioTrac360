@@ -1,5 +1,8 @@
+import { useState } from "react";
+
 import type { WorkspaceUser } from "../api/types";
 import { formatDateTime } from "../lib/format";
+import { SecurityDialog } from "../features/SecurityDialog";
 
 interface HomeTopBarProps {
   user: WorkspaceUser;
@@ -11,6 +14,7 @@ interface HomeTopBarProps {
 
 export function HomeTopBar({ user, onLogout, onHome, pageLabel = "Home", brandLabel }: HomeTopBarProps) {
   const organizationName = user.organization?.name || brandLabel || "PhysioTrac360";
+  const [showSecurity, setShowSecurity] = useState(false);
 
   return (
     <header className="home-topbar">
@@ -44,6 +48,16 @@ export function HomeTopBar({ user, onLogout, onHome, pageLabel = "Home", brandLa
       </div>
 
       <div className="home-topbar-right">
+        <button type="button" className="home-topbar-icon" onClick={() => setShowSecurity(true)} aria-label="Security and active sessions" title="Security">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path
+              d="M12 3.5 19.5 6.3V11c0 5-3.2 8.4-7.5 9.7-4.3-1.3-7.5-4.7-7.5-9.7V6.3L12 3.5Z"
+              stroke="currentColor"
+              strokeWidth="1.6"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </button>
         <button type="button" className="home-topbar-icon" onClick={() => window.print()} aria-label="Print this page" title="Print">
           <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
             <path d="M6 9V3.5h12V9" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
@@ -55,6 +69,8 @@ export function HomeTopBar({ user, onLogout, onHome, pageLabel = "Home", brandLa
           Logout
         </button>
       </div>
+
+      {showSecurity && <SecurityDialog user={user} onClose={() => setShowSecurity(false)} />}
     </header>
   );
 }

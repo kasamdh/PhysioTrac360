@@ -82,6 +82,11 @@ class Organization(UUIDTimeStampedModel):
     zip_code = models.CharField(max_length=20, blank=True)
     country = models.CharField(max_length=80, default="United States")
     comments = models.TextField(blank=True)
+    # Clinical documentation policy: whether a PTA/ASSISTANT-authored note
+    # requires a supervising PT/Director cosignature before it's final.
+    # Conservative default (True) since this is new safety-relevant behavior
+    # for every existing PTA the moment this ships, unless an admin opts out.
+    pta_cosign_required = models.BooleanField(default=True)
     onboarding_completed_at = models.DateTimeField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
     suspended_at = models.DateTimeField(null=True, blank=True)
@@ -557,6 +562,13 @@ class User(AbstractUser):
         COMPLIANCE = "compliance", "Compliance officer"
         PATIENT = "patient", "Patient portal user"
 
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        INACTIVE = "inactive", "Inactive"
+        LOCKED_OUT = "locked_out", "Locked Out"
+        SUSPENDED = "suspended", "Suspended"
+        DELETED = "deleted", "Deleted"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     organization = models.ForeignKey(
         Organization,
@@ -568,6 +580,25 @@ class User(AbstractUser):
     role = models.CharField(max_length=24, choices=Role.choices, default=Role.THERAPIST)
     credential = models.CharField(max_length=64, blank=True)
     must_use_mfa = models.BooleanField(default=True)
+    must_change_password = models.BooleanField(default=False)
+
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.ACTIVE)
+    status_changed_at = models.DateTimeField(null=True, blank=True)
+    status_changed_by = models.ForeignKey(
+        "self", on_delete=models.SET_NULL, null=True, blank=True, related_name="status_changed_users"
+    )
+
+    failed_login_attempts = models.PositiveIntegerField(default=0)
+    last_failed_login_at = models.DateTimeField(null=True, blank=True)
+    locked_at = models.DateTimeField(null=True, blank=True)
+    locked_until = models.DateTimeField(null=True, blank=True)
+
+    suspended_at = models.DateTimeField(null=True, blank=True)
+    suspended_by = models.ForeignKey(
+        "self", on_delete=models.SET_NULL, null=True, blank=True, related_name="suspended_users"
+    )
+    suspension_reason = models.TextField(blank=True)
+
     archived_at = models.DateTimeField(null=True, blank=True)
     archived_by = models.ForeignKey(
         "self",
@@ -588,6 +619,42 @@ class User(AbstractUser):
             and self.role == self.Role.SUPER_ADMIN
             and self.organization_id is None
         )
+
+    @property
+    def effective_status(self) -> str:
+        """Status as it should be treated right now, healing an expired lockout for display
+        purposes only — the underlying row is only written back to ACTIVE the next time this
+        account actually attempts to authenticate (see `care.api.views.login`)."""
+        if self.status == self.Status.LOCKED_OUT and self.locked_until and self.locked_until <= timezone.now():
+            return self.Status.ACTIVE
+        return self.status
+
+    @property
+    def _worst_license(self):
+        """The single most urgent license among this user's `UserLicense` rows
+        (smallest `days_remaining`), or None if the role doesn't carry a
+        license or none is on file. Backs the two aggregate properties below,
+        which the list/badge UI reads since it shows one value per user even
+        though a PT/PTA may hold several licenses."""
+        if self.role not in {self.Role.THERAPIST, self.Role.ASSISTANT}:
+            return None
+        return min(self.licenses.all(), key=lambda license: license.days_remaining, default=None)
+
+    @property
+    def license_days_remaining(self) -> int | None:
+        """Days until this account's most urgent license expires, or negative
+        if already expired. None when the role doesn't carry a license or
+        none is on file."""
+        worst = self._worst_license
+        return worst.days_remaining if worst else None
+
+    @property
+    def license_alert_status(self) -> str:
+        """'none' | 'valid' | 'expiring_soon' | 'critical' | 'expired' — drives
+        the onboarding alert banner, aggregated across every license this user
+        holds. Only meaningful for licensed clinician roles."""
+        worst = self._worst_license
+        return worst.color_bucket if worst else "none"
 
     def clean(self):
         super().clean()
@@ -635,6 +702,45 @@ class User(AbstractUser):
             self.Role.ASSISTANT,
             self.Role.SCHEDULER,
         }
+
+
+class UserSession(UUIDTimeStampedModel):
+    """One authenticated browser/device session, tracked independently of
+    Django's own session store so a login can be revoked, listed, and limited
+    per user regardless of how long the underlying session cookie is valid.
+    """
+
+    class RevokedReason(models.TextChoices):
+        NEW_LOGIN = "new_login", "Signed in from another browser or device"
+        USER_LOGOUT = "user_logout", "Signed out"
+        IDLE_TIMEOUT = "idle_timeout", "Idle timeout"
+        ABSOLUTE_TIMEOUT = "absolute_timeout", "Maximum session lifetime reached"
+        PASSWORD_CHANGED = "password_changed", "Password changed"
+        PASSWORD_RESET = "password_reset", "Password reset by an administrator"
+        ACCOUNT_LOCKED = "account_locked", "Account locked"
+        ACCOUNT_SUSPENDED = "account_suspended", "Account suspended"
+        ACCOUNT_DEACTIVATED = "account_deactivated", "Account deactivated"
+        ACCOUNT_DELETED = "account_deleted", "Account deleted"
+        ADMIN_REVOKED = "admin_revoked", "Signed out by an administrator"
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="sessions")
+    organization = models.ForeignKey(Organization, on_delete=models.CASCADE, null=True, blank=True, related_name="user_sessions")
+    django_session_key = models.CharField(max_length=64, unique=True)
+    last_activity_at = models.DateTimeField(default=timezone.now)
+    expires_at = models.DateTimeField()
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revoked_reason = models.CharField(max_length=24, choices=RevokedReason.choices, blank=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.CharField(max_length=400, blank=True)
+    device_name = models.CharField(max_length=80, blank=True)
+    browser_name = models.CharField(max_length=80, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    @property
+    def is_active(self) -> bool:
+        return self.revoked_at is None and self.expires_at > timezone.now()
 
 
 class Patient(UUIDTimeStampedModel):
@@ -821,6 +927,104 @@ class PatientDocument(UUIDTimeStampedModel):
         return self.title
 
 
+def user_license_document_upload_path(instance, filename: str) -> str:
+    """Opaque name under a per-user folder, mirroring `patient_document_upload_path` —
+    the original filename is kept separately on the model."""
+    extension = Path(filename).suffix.lower()
+    return "license_documents/%s/%s%s" % (instance.user_id, uuid.uuid4().hex, extension)
+
+
+class UserLicense(UUIDTimeStampedModel):
+    """One professional license (e.g. a state PT/PTA license) held by a user.
+    A clinician may hold several — one per issuing state — so this is a child
+    table rather than flat fields on `User`. Expiry severity (`alert_tier`/
+    `color_bucket`) is always computed from `expires_at` + today, never
+    stored, matching `User.effective_status`'s "don't store what's derivable"
+    philosophy; `verification_status` is the one piece of real stored state,
+    since whether an admin has reviewed the uploaded document is a genuine
+    fact, not something derivable from a date.
+    """
+
+    class VerificationStatus(models.TextChoices):
+        PENDING_VERIFICATION = "pending_verification", "Pending verification"
+        VERIFIED = "verified", "Verified"
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="licenses")
+    license_number = models.CharField(max_length=80)
+    issuing_state = models.CharField(max_length=40)
+    license_type = models.CharField(max_length=40, blank=True)
+    issue_date = models.DateField(null=True, blank=True)
+    expires_at = models.DateField()
+
+    verification_status = models.CharField(
+        max_length=24, choices=VerificationStatus.choices, default=VerificationStatus.PENDING_VERIFICATION
+    )
+    verified_at = models.DateTimeField(null=True, blank=True)
+    verified_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="verified_licenses"
+    )
+    verification_notes = models.TextField(blank=True)
+
+    document = models.FileField(
+        upload_to=user_license_document_upload_path,
+        storage=private_document_storage,
+        validators=[FileExtensionValidator(allowed_extensions=["pdf", "png", "jpg", "jpeg", "doc", "docx"])],
+        null=True,
+        blank=True,
+    )
+    document_original_filename = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        ordering = ["-expires_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "issuing_state", "license_number"], name="unique_user_license_per_state_number"
+            )
+        ]
+        indexes = [models.Index(fields=["user", "expires_at"])]
+
+    @property
+    def organization(self):
+        """Not a stored field — lets `record_audit_event` resolve the tenant
+        for a license the same way it already does for any other object,
+        via `getattr(obj, "organization", None)`, without duplicating data."""
+        return self.user.organization
+
+    @property
+    def days_remaining(self) -> int:
+        return (self.expires_at - timezone.localdate()).days
+
+    @property
+    def alert_tier(self) -> str:
+        """Escalating severity, most to least urgent: 'expired', 'critical_7',
+        'critical_14', 'expiring_30', 'expiring_60', 'expiring_90', 'valid'."""
+        days = self.days_remaining
+        if days < 0:
+            return "expired"
+        labels = {7: "critical_7", 14: "critical_14", 30: "expiring_30", 60: "expiring_60", 90: "expiring_90"}
+        for threshold in sorted(settings.LICENSE_WARNING_DAYS):
+            if days <= threshold:
+                return labels.get(threshold, f"expiring_{threshold}")
+        return "valid"
+
+    @property
+    def color_bucket(self) -> str:
+        """'valid' | 'expiring_soon' | 'critical' | 'expired' — the 4-color
+        grouping the badge/banner UI actually renders; `alert_tier` carries
+        the precise day-count tier for the banner's message text."""
+        tier = self.alert_tier
+        if tier == "expired":
+            return "expired"
+        if tier.startswith("critical_"):
+            return "critical"
+        if tier.startswith("expiring_"):
+            return "expiring_soon"
+        return "valid"
+
+    def __str__(self) -> str:
+        return f"{self.issuing_state} {self.license_number}".strip()
+
+
 class Appointment(UUIDTimeStampedModel):
     """A scheduled clinic, telehealth, or home-visit appointment."""
 
@@ -953,6 +1157,7 @@ class ClinicalNote(UUIDTimeStampedModel):
         EVALUATION = "evaluation", "Initial evaluation"
         DAILY = "daily", "Daily treatment note"
         PROGRESS = "progress", "Progress note"
+        RE_EVALUATION = "re_evaluation", "Re-evaluation"
         DISCHARGE = "discharge", "Discharge summary"
         HANDOFF = "handoff", "Handoff summary"
 
@@ -992,6 +1197,25 @@ class ClinicalNote(UUIDTimeStampedModel):
     signed_at = models.DateTimeField(null=True, blank=True)
     finalization_attestation = models.BooleanField(default=False)
 
+    # Structured section data (ROM/MMT/special-tests/pain detail, discharge
+    # specifics) — read/written as one blob per note, never queried across
+    # notes in SQL, matching the existing OutcomeScore.item_responses /
+    # IntakeSubmission.answers JSONField precedent in this codebase.
+    subjective_details = models.JSONField(default=dict, blank=True)
+    objective_measurements = models.JSONField(default=dict, blank=True)
+    discharge_details = models.JSONField(default=dict, blank=True)
+
+    # PTA cosign: set from Organization.pta_cosign_required at creation time
+    # (only meaningful when the author is a PTA/ASSISTANT) — snapshotted so a
+    # later org-policy change never silently changes an in-progress note's
+    # requirement, matching diagnosis_snapshot/precautions_snapshot's pattern.
+    cosign_required = models.BooleanField(default=False)
+    cosigned_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="cosigned_notes",
+    )
+    cosigned_at = models.DateTimeField(null=True, blank=True)
+
     class Meta:
         ordering = ["-service_date", "-created_at"]
         indexes = [
@@ -1019,6 +1243,8 @@ class ClinicalNote(UUIDTimeStampedModel):
                 errors["finalization_attestation"] = (
                     "Therapist attestation is required to finalize a note."
                 )
+            if self.cosign_required and not (self.cosigned_by_id and self.cosigned_at):
+                errors["cosigned_by"] = "A supervising cosignature is required to finalize this note."
         if errors:
             raise ValidationError(errors)
 
@@ -1052,6 +1278,37 @@ class NoteAddendum(UUIDTimeStampedModel):
     def clean(self):
         if not self.note.is_signed:
             raise ValidationError("Addenda can only be attached to signed notes.")
+
+
+class NoteIntervention(UUIDTimeStampedModel):
+    """One structured treatment line item on a Daily Treatment Note (the
+    "treatment timer" — repeatable, billing-adjacent, and summed, unlike the
+    free-text `ClinicalNote.interventions` field it sits alongside). A real
+    child table rather than JSON because these rows need a DB-level sum for
+    the timer and are the kind of data most likely to need reporting later —
+    the same shape `NoteAddendum` already is to `ClinicalNote`.
+    """
+
+    note = models.ForeignKey(
+        ClinicalNote, on_delete=models.CASCADE, related_name="intervention_items"
+    )
+    description = models.CharField(max_length=240)
+    body_region = models.CharField(max_length=80, blank=True)
+    minutes = models.PositiveSmallIntegerField(default=0)
+    units = models.PositiveSmallIntegerField(null=True, blank=True)
+    is_timed = models.BooleanField(default=True)
+    patient_response = models.CharField(max_length=240, blank=True)
+    order = models.PositiveSmallIntegerField(default=0)
+
+    class Meta:
+        ordering = ["order", "created_at"]
+
+    def clean(self):
+        if self.note_id and self.note.is_signed:
+            raise ValidationError("Interventions cannot be changed once the note is signed.")
+
+    def __str__(self) -> str:
+        return self.description
 
 
 class FunctionalGoal(UUIDTimeStampedModel):

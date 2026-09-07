@@ -3,6 +3,7 @@ export interface Capabilities {
   canAccessClinical: boolean;
   canManageSchedule: boolean;
   canSignNotes: boolean;
+  canCosignNotes: boolean;
   canManageAccess: boolean;
   canManageOperations: boolean;
   canManageBilling: boolean;
@@ -98,6 +99,29 @@ export interface PrivilegedPatientDetail {
   grant: PrivilegedAccessGrant;
 }
 
+export type UserAccountStatus = "active" | "inactive" | "locked_out" | "suspended" | "deleted";
+
+export type LicenseAlertStatus = "none" | "valid" | "expiring_soon" | "critical" | "expired";
+export type LicenseVerificationStatus = "pending_verification" | "verified";
+
+export interface UserLicenseInfo {
+  id: string;
+  licenseNumber: string;
+  issuingState: string;
+  licenseType: string;
+  issueDate: string | null;
+  expiresAt: string;
+  verificationStatus: LicenseVerificationStatus;
+  verifiedAt: string | null;
+  verifiedByName: string | null;
+  verificationNotes: string;
+  hasDocument: boolean;
+  documentFilename: string;
+  alertTier: string;
+  colorBucket: Exclude<LicenseAlertStatus, "none">;
+  daysRemaining: number;
+}
+
 export interface ManagedClientUser {
   id: string;
   name: string;
@@ -108,10 +132,38 @@ export interface ManagedClientUser {
   role: string;
   roleLabel: string;
   active: boolean;
+  credential: string;
+  licenses: UserLicenseInfo[];
+  licenseAlertStatus: LicenseAlertStatus;
+  licenseDaysRemaining: number | null;
   mustUseMfa: boolean;
   archivedAt: string | null;
   clientNumber: number | null;
   clientName: string | null;
+  status: UserAccountStatus;
+  statusLabel: string;
+  lastLogin: string | null;
+  failedLoginAttempts: number;
+  lastFailedLoginAt: string | null;
+  lockedAt: string | null;
+  lockedUntil: string | null;
+  suspendedAt: string | null;
+  suspendedBy: string | null;
+  suspensionReason: string;
+  archivedBy: string | null;
+  statusChangedAt: string | null;
+  statusChangedBy: string | null;
+  activeSessions: UserSessionInfo[];
+}
+
+export interface UserSessionInfo {
+  id: string;
+  deviceName: string;
+  browserName: string;
+  ipAddress: string | null;
+  createdAt: string;
+  lastActivityAt: string;
+  isCurrent: boolean;
 }
 
 export interface WorkspaceUser {
@@ -121,6 +173,7 @@ export interface WorkspaceUser {
   role: string;
   roleLabel: string;
   lastLogin: string | null;
+  mustChangePassword: boolean;
   organization: {
     id: string;
     name: string;
@@ -261,7 +314,66 @@ export interface NoteSummary {
   statusLabel: string;
   serviceDate: string;
   reassessmentDue: string | null;
+  updatedAt: string;
+  therapistId: string;
+  therapistName: string;
+  appointmentId: string | null;
+  cosignRequired: boolean;
   complianceFindings?: ComplianceFinding[];
+}
+
+export interface NoteIntervention {
+  id: string;
+  description: string;
+  bodyRegion: string;
+  minutes: number;
+  units: number | null;
+  isTimed: boolean;
+  patientResponse: string;
+  order: number;
+}
+
+export interface NoteAddendumInfo {
+  id: string;
+  author: string;
+  reason: string;
+  body: string;
+  createdAt: string;
+}
+
+export interface NoteDetail extends NoteSummary {
+  diagnosisSnapshot: string;
+  precautionsSnapshot: string;
+  subjective: string;
+  objective: string;
+  interventions: string;
+  assessment: string;
+  plan: string;
+  subjectiveDetails: Record<string, unknown>;
+  objectiveMeasurements: Record<string, unknown>;
+  dischargeDetails: Record<string, unknown>;
+  planOfCareStart: string | null;
+  planOfCareEnd: string | null;
+  frequencyPerWeek: number | null;
+  durationWeeks: number | null;
+  signatureName: string;
+  signedAt: string | null;
+  finalizationAttestation: boolean;
+  cosignedBy: string | null;
+  cosignedAt: string | null;
+  interventionItems: NoteIntervention[];
+  addenda: NoteAddendumInfo[];
+  complianceFindings: ComplianceFinding[];
+}
+
+export interface DocumentationListFilters {
+  status?: string;
+  noteType?: string;
+  providerId?: string;
+  quick?: string;
+  q?: string;
+  pageSize?: string;
+  page?: string;
 }
 
 export interface Goal {

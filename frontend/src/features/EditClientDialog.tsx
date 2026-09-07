@@ -2,12 +2,21 @@ import { FormEvent, useState } from "react";
 
 import { ApiError, api } from "../api/client";
 import type { ManagedClient } from "../api/types";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogFooter, FormRow } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 
 interface EditClientDialogProps {
   client: ManagedClient;
   onClose: () => void;
   onSaved: () => Promise<void>;
 }
+
+const TIERS = [["starter", "Starter"], ["professional", "Professional"], ["premium", "Premium"], ["enterprise", "Enterprise"]] as const;
+const TIMEZONES = ["America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles", "America/Phoenix", "Pacific/Honolulu"];
+
+const selectClass = "flex h-[54px] w-full rounded-md border-0 bg-white px-4 text-[1.0625rem] text-foreground shadow-[inset_0_0_0_1px_var(--color-input)] outline-none focus:shadow-[inset_0_0_0_1.5px_var(--color-primary)] disabled:cursor-not-allowed disabled:opacity-50";
 
 export function EditClientDialog({ client, onClose, onSaved }: EditClientDialogProps) {
   const [form, setForm] = useState({
@@ -28,7 +37,7 @@ export function EditClientDialog({ client, onClose, onSaved }: EditClientDialogP
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
 
-  function update(field: string, value: string) {
+  function update(field: keyof typeof form, value: string) {
     setForm((current) => ({ ...current, [field]: value }));
     setFieldErrors((current) => ({ ...current, [field]: "" }));
   }
@@ -53,5 +62,59 @@ export function EditClientDialog({ client, onClose, onSaved }: EditClientDialogP
     }
   }
 
-  return <div className="modal-backdrop"><section className="move-dialog client-dialog" role="dialog" aria-modal="true" aria-labelledby="edit-client-title"><button className="dialog-close" onClick={onClose} disabled={busy} aria-label="Close">×</button><p className="eyebrow">Client #{client.clientNumber}</p><h2 id="edit-client-title">Edit {client.clientName}</h2>{error && <p className="form-error" role="alert">{error}</p>}<form className="stack-form" onSubmit={submit}><div className="field-grid"><label>Client name<input required value={form.clientName} onChange={(event) => update("clientName", event.target.value)} />{fieldErrors.clientName && <small className="field-error">{fieldErrors.clientName}</small>}</label><label>Client email<input required type="email" value={form.clientEmail} onChange={(event) => update("clientEmail", event.target.value)} />{fieldErrors.clientEmail && <small className="field-error">{fieldErrors.clientEmail}</small>}</label><label>Phone<input value={form.clientPhone} onChange={(event) => update("clientPhone", event.target.value)} /></label><label>Address line 1<input required value={form.addressLine1} onChange={(event) => update("addressLine1", event.target.value)} /></label><label>Address line 2<input value={form.addressLine2} onChange={(event) => update("addressLine2", event.target.value)} /></label><label>City<input required value={form.city} onChange={(event) => update("city", event.target.value)} /></label><label>State<input required value={form.state} onChange={(event) => update("state", event.target.value)} /></label><label>ZIP<input required value={form.zipCode} onChange={(event) => update("zipCode", event.target.value)} /></label><label>Country<input value={form.country} onChange={(event) => update("country", event.target.value)} /></label></div><div className="field-grid"><label>Subscription tier<select value={form.subscriptionTier} onChange={(event) => update("subscriptionTier", event.target.value)}><option value="starter">Starter</option><option value="professional">Professional</option><option value="premium">Premium</option><option value="enterprise">Enterprise</option></select></label><label>Timezone<select value={form.timezone} onChange={(event) => update("timezone", event.target.value)}><option>America/New_York</option><option>America/Chicago</option><option>America/Denver</option><option>America/Los_Angeles</option><option>America/Phoenix</option><option>Pacific/Honolulu</option></select></label></div><label>Comments<textarea rows={3} value={form.comments} onChange={(event) => update("comments", event.target.value)} /></label><div className="button-row"><button className="secondary-button" type="button" onClick={onClose} disabled={busy}>Cancel</button><button className="primary-button" type="submit" disabled={busy}>{busy ? "Saving..." : "Save changes"}</button></div></form></section></div>;
+  return (
+    <Dialog titleId="edit-client-title" eyebrow={`Client #${client.clientNumber}`} title={`Edit ${client.clientName}`} onClose={onClose} busy={busy} maxWidth="max-w-3xl">
+      {error && (
+        <p role="alert" className="mb-3 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">
+          {error}
+        </p>
+      )}
+      <form onSubmit={submit}>
+        <FormRow label="Client name" htmlFor="edit-client-name" error={fieldErrors.clientName}>
+          <Input id="edit-client-name" required value={form.clientName} onChange={(event) => update("clientName", event.target.value)} className="text-[1.0625rem]" />
+        </FormRow>
+        <FormRow label="Client email" htmlFor="edit-client-email" error={fieldErrors.clientEmail}>
+          <Input id="edit-client-email" required type="email" value={form.clientEmail} onChange={(event) => update("clientEmail", event.target.value)} className="text-[1.0625rem]" />
+        </FormRow>
+        <FormRow label="Phone" htmlFor="edit-client-phone">
+          <Input id="edit-client-phone" value={form.clientPhone} onChange={(event) => update("clientPhone", event.target.value)} className="text-[1.0625rem]" />
+        </FormRow>
+        <FormRow label="Address line 1" htmlFor="edit-client-address1" error={fieldErrors.addressLine1}>
+          <Input id="edit-client-address1" required value={form.addressLine1} onChange={(event) => update("addressLine1", event.target.value)} className="text-[1.0625rem]" />
+        </FormRow>
+        <FormRow label="Address line 2" htmlFor="edit-client-address2">
+          <Input id="edit-client-address2" value={form.addressLine2} onChange={(event) => update("addressLine2", event.target.value)} className="text-[1.0625rem]" />
+        </FormRow>
+        <FormRow label="City" htmlFor="edit-client-city" error={fieldErrors.city}>
+          <Input id="edit-client-city" required value={form.city} onChange={(event) => update("city", event.target.value)} className="text-[1.0625rem]" />
+        </FormRow>
+        <FormRow label="State" htmlFor="edit-client-state" error={fieldErrors.state}>
+          <Input id="edit-client-state" required value={form.state} onChange={(event) => update("state", event.target.value)} className="text-[1.0625rem]" />
+        </FormRow>
+        <FormRow label="ZIP" htmlFor="edit-client-zip" error={fieldErrors.zipCode}>
+          <Input id="edit-client-zip" required value={form.zipCode} onChange={(event) => update("zipCode", event.target.value)} className="text-[1.0625rem]" />
+        </FormRow>
+        <FormRow label="Country" htmlFor="edit-client-country">
+          <Input id="edit-client-country" value={form.country} onChange={(event) => update("country", event.target.value)} className="text-[1.0625rem]" />
+        </FormRow>
+        <FormRow label="Subscription tier" htmlFor="edit-client-tier">
+          <select id="edit-client-tier" value={form.subscriptionTier} onChange={(event) => update("subscriptionTier", event.target.value)} className={selectClass}>
+            {TIERS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+          </select>
+        </FormRow>
+        <FormRow label="Timezone" htmlFor="edit-client-timezone">
+          <select id="edit-client-timezone" value={form.timezone} onChange={(event) => update("timezone", event.target.value)} className={selectClass}>
+            {TIMEZONES.map((zone) => <option key={zone} value={zone}>{zone}</option>)}
+          </select>
+        </FormRow>
+        <FormRow label="Comments" htmlFor="edit-client-comments">
+          <Textarea id="edit-client-comments" rows={3} value={form.comments} onChange={(event) => update("comments", event.target.value)} />
+        </FormRow>
+        <DialogFooter>
+          <Button type="button" variant="secondary" disabled={busy} onClick={onClose}>Cancel</Button>
+          <Button type="submit" disabled={busy}>{busy ? "Saving..." : "Save and Close"}</Button>
+        </DialogFooter>
+      </form>
+    </Dialog>
+  );
 }

@@ -15,8 +15,21 @@ from django.views.decorators.http import require_GET, require_http_methods, requ
 from django.middleware.csrf import get_token
 
 from ..access import BILLING_ROLES, CLINICAL_ROLES, SCHEDULING_ROLES, patients_for, require_role
-from ..models import AIArtifact, Appointment, ClinicalNote, Organization, Patient, SecureMessage, User
+from ..models import AIArtifact, Appointment, ClinicalNote, Organization, Patient, SecureMessage, User, UserSession
 from ..services import outcome_trends, patient_compliance_findings, record_audit_event
+from ..user_management import (
+    apply_status_action,
+    heal_expired_lockout,
+    register_failed_login,
+    suspend_expired_license,
+    sweep_expired_licenses,
+)
+from ..session_management import (
+    create_session,
+    revoke_all_sessions_for_user,
+    revoke_session,
+    serialize_session,
+)
 from .serializers import (
     serialize_appointment,
     serialize_goal,
@@ -56,8 +69,27 @@ def login(request):
     portal_slug = str(payload.get("portalSlug", "")).strip()
     if not username or not isinstance(password, str) or not password:
         return api_error("Enter a username and password.", status=400)
+
+    candidate = User.objects.filter(username=username).select_related("organization").first()
+    if (
+        candidate
+        and candidate.status == User.Status.LOCKED_OUT
+        and candidate.locked_until
+        and candidate.locked_until <= timezone.now()
+    ):
+        heal_expired_lockout(candidate)
+    if candidate and candidate.status == User.Status.ACTIVE:
+        suspend_expired_license(candidate)
+
     user = authenticate(request, username=username, password=password)
     if user is None:
+        # Keep the response generic regardless of the reason (wrong password,
+        # inactive, locked, suspended, deleted) to avoid revealing account
+        # status to an unauthenticated caller — only register the failed
+        # attempt when it was a genuine wrong-password try against an
+        # otherwise-active account, so lockout policy stays meaningful.
+        if candidate and candidate.organization_id and candidate.status == User.Status.ACTIVE:
+            register_failed_login(candidate)
         return api_error("Invalid username or password.", status=401)
     if (
         portal_slug
@@ -69,13 +101,23 @@ def login(request):
         return JsonResponse({"status": 403, "code": "ORGANIZATION_ARCHIVED", "message": "Your organization account has been archived. Please contact your administrator."}, status=403)
     if user.organization_id and (not user.organization.is_active or user.organization.status == user.organization.Status.SUSPENDED):
         return JsonResponse({"status": 403, "code": "ORGANIZATION_SUSPENDED", "message": "Your organization account is currently suspended. Please contact your administrator."}, status=403)
+    if user.failed_login_attempts:
+        user.failed_login_attempts = 0
+        user.save(update_fields=["failed_login_attempts"])
     auth_login(request, user)
+    request.session.save()
+    create_session(user, request)
     return JsonResponse({"user": serialize_user(user), "csrfToken": get_token(request)})
 
 
 @require_POST
 @api_login_required
 def logout(request):
+    session_key = request.session.session_key
+    if session_key:
+        tracked = UserSession.objects.filter(django_session_key=session_key).first()
+        if tracked:
+            revoke_session(tracked, UserSession.RevokedReason.USER_LOGOUT, actor=request.user, request=request)
     auth_logout(request)
     return JsonResponse({"detail": "Signed out."})
 
@@ -83,24 +125,39 @@ def logout(request):
 @require_POST
 @api_login_required
 def change_password(request):
-    """Self-service password change for the signed-in user (any role)."""
+    """Self-service password change for the signed-in user (any role).
+
+    A user whose account is flagged `must_change_password` (an admin just set
+    a new password for them) is not required to re-enter that password here —
+    they only just used it to log in — but everyone else must prove they know
+    the current password before replacing it.
+    """
     try:
         payload = json_body(request)
     except InvalidJSON as exc:
         return api_error(str(exc), status=400)
-    current_password = payload.get("currentPassword", "")
     new_password = payload.get("newPassword", "")
-    if not isinstance(current_password, str) or not request.user.check_password(current_password):
-        return api_error("Current password is incorrect.", status=400)
+    confirm_password = payload.get("confirmPassword")
+    if not request.user.must_change_password:
+        current_password = payload.get("currentPassword", "")
+        if not isinstance(current_password, str) or not request.user.check_password(current_password):
+            return api_error("Current password is incorrect.", status=400)
+    if confirm_password is not None and new_password != confirm_password:
+        return api_error("The passwords do not match.", status=400)
     if not isinstance(new_password, str) or len(new_password) < 12:
         return api_error("Choose a new password with at least 12 characters.", status=400)
     request.user.set_password(new_password)
-    request.user.save(update_fields=["password"])
+    request.user.must_change_password = False
+    request.user.save(update_fields=["password", "must_change_password"])
     update_session_auth_hash(request, request.user)
     if request.user.organization_id:
         # Platform super admins have no organization, and audit events are
         # always organization-scoped, so there is nowhere to log this for them.
         record_audit_event(actor=request.user, action="user.password_changed", obj=request.user, request=request)
+    revoke_all_sessions_for_user(
+        request.user, UserSession.RevokedReason.PASSWORD_CHANGED,
+        actor=request.user, request=request, except_session_key=request.session.session_key,
+    )
     return JsonResponse({"detail": "Password updated."})
 
 
@@ -133,9 +190,18 @@ def organization_users(request):
                 {"detail": "Please correct the highlighted fields.", "errors": errors}, status=422
             )
         return JsonResponse({"user": serialize_client_user(user)}, status=201)
+    sweep_expired_licenses(organization.users.all())
     users = organization.users.select_related("organization").order_by("last_name", "first_name", "username")
-    if request.GET.get("includeArchived", "").strip().lower() != "true":
-        users = users.filter(archived_at__isnull=True)
+    status = request.GET.get("status", "").strip()
+    include_archived = request.GET.get("includeArchived", "").strip().lower() == "true"
+    if status and status in User.Status.values:
+        users = users.filter(status=status)
+        include_archived = include_archived or status == User.Status.DELETED
+    elif status == "archived":
+        users = users.filter(status=User.Status.DELETED)
+        include_archived = True
+    if not include_archived:
+        users = users.exclude(status=User.Status.DELETED)
     try:
         page_size = min(max(int(request.GET.get("pageSize", "25")), 10), 100)
         page = max(int(request.GET.get("page", "1")), 1)
@@ -184,6 +250,8 @@ def organization_user_detail(request, user_id):
             self_errors["role"] = "You cannot change your own role."
         if payload.get("mustUseMfa") is False:
             self_errors["mustUseMfa"] = "You cannot opt your own account out of MFA policy."
+        if payload.get("password"):
+            self_errors["password"] = "Use the self-service change password option for your own account."
         if self_errors:
             return JsonResponse({"detail": "Please correct the highlighted fields.", "errors": self_errors}, status=422)
 
@@ -191,6 +259,77 @@ def organization_user_detail(request, user_id):
     if errors:
         return JsonResponse({"detail": "Please correct the highlighted fields.", "errors": errors}, status=status_code)
     return JsonResponse({"user": serialize_client_user(updated)})
+
+
+@require_POST
+@api_login_required
+def organization_user_status_action(request, user_id):
+    """Organization-admin account-status actions, scoped to their own tenant only."""
+    organization, error = organization_or_error(request, roles={User.Role.ADMIN})
+    if error:
+        return error
+    account = User.objects.filter(pk=user_id, organization=organization).first()
+    if not account:
+        return api_error("User was not found.", status=404)
+    try:
+        payload = json_body(request)
+    except InvalidJSON as exc:
+        return api_error(str(exc), status=400)
+    action = str(payload.get("action", "")).strip()
+    reason = str(payload.get("reason", "") or "")
+    updated, errors, status_code = apply_status_action(account, action, request.user, reason=reason, request=request)
+    if errors:
+        return JsonResponse({"detail": "Please correct the highlighted fields.", "errors": errors}, status=status_code)
+    return JsonResponse({"user": serialize_client_user(updated)})
+
+
+@require_POST
+@api_login_required
+def organization_user_revoke_sessions(request, user_id):
+    """Organization-admin 'Sign Out User From All Devices', scoped to their own tenant."""
+    organization, error = organization_or_error(request, roles={User.Role.ADMIN})
+    if error:
+        return error
+    account = User.objects.filter(pk=user_id, organization=organization).first()
+    if not account:
+        return api_error("User was not found.", status=404)
+    count = revoke_all_sessions_for_user(account, UserSession.RevokedReason.ADMIN_REVOKED, actor=request.user, request=request)
+    return JsonResponse({"user": serialize_client_user(account), "revokedCount": count})
+
+
+@require_GET
+@api_login_required
+def my_sessions(request):
+    """Self-service: list the signed-in user's own active sessions."""
+    current_key = request.session.session_key
+    sessions = UserSession.objects.filter(
+        user=request.user, revoked_at__isnull=True, expires_at__gt=timezone.now()
+    ).order_by("-created_at")
+    return JsonResponse({"sessions": [serialize_session(s, current_session_key=current_key) for s in sessions]})
+
+
+@require_POST
+@api_login_required
+def revoke_my_session(request, session_id):
+    """Self-service: sign out one of the user's own OTHER sessions."""
+    session = UserSession.objects.filter(pk=session_id, user=request.user).first()
+    if not session:
+        return api_error("Session was not found.", status=404)
+    if session.django_session_key == request.session.session_key:
+        return api_error("Use logout to end your current session.", status=400)
+    revoke_session(session, UserSession.RevokedReason.USER_LOGOUT, actor=request.user, request=request)
+    return JsonResponse({"detail": "Session signed out."})
+
+
+@require_POST
+@api_login_required
+def revoke_my_other_sessions(request):
+    """Self-service: 'Sign Out All Other Sessions', keeping the current one."""
+    count = revoke_all_sessions_for_user(
+        request.user, UserSession.RevokedReason.USER_LOGOUT,
+        actor=request.user, request=request, except_session_key=request.session.session_key,
+    )
+    return JsonResponse({"detail": "Other sessions signed out.", "revokedCount": count})
 
 
 @require_GET

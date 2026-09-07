@@ -1,7 +1,9 @@
 import json
 from datetime import date, datetime, time, timedelta
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+from django.core import mail
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
@@ -16,6 +18,7 @@ from .models import (
     AppointmentType,
     AuditEvent,
     BookingConfiguration,
+    ClientInvitation,
     ClinicalNote,
     Consent,
     Feature,
@@ -39,6 +42,8 @@ from .models import (
     SubscriptionPlan,
     Superbill,
     User,
+    UserLicense,
+    UserSession,
 )
 from .services import compose_draft, goal_suggestions, note_compliance_findings, record_audit_event
 
@@ -1376,6 +1381,64 @@ class ClinicalWorkflowTests(TestCase):
         )
         self.assertEqual(event.organization, client)
 
+        self.assertEqual(len(mail.outbox), 1)
+        sent = mail.outbox[0]
+        self.assertEqual(sent.to, ["admin@new-platform-client.example.test"])
+        invitation_url = response.json()["invitationUrl"]
+        self.assertIn(invitation_url, sent.body)
+        from django.conf import settings
+        self.assertTrue(invitation_url.startswith(settings.FRONTEND_BASE_URL))
+
+    def test_resend_invite_emails_a_fresh_link_and_invalidates_the_old_one(self):
+        platform_admin = User(username="clinic_admin", role=User.Role.SUPER_ADMIN, is_superuser=True)
+        platform_admin.set_password("safe-test-password")
+        platform_admin.full_clean()
+        platform_admin.save()
+        self.client.force_login(platform_admin)
+
+        create_response = self.client.post(
+            reverse("api-super-admin-client-create"),
+            data=json.dumps({
+                "clientName": "Resend Client", "clientEmail": "support@resend-client.example.test",
+                "addressLine1": "1 Resend Way", "city": "Boston", "state": "MA", "zipCode": "02101",
+                "subscriptionTier": "professional", "timezone": "America/New_York",
+                "adminFirstName": "Resend", "adminLastName": "Admin", "adminEmail": "admin@resend-client.example.test",
+            }),
+            content_type="application/json",
+        )
+        client_number = create_response.json()["client"]["clientNumber"]
+        original_invite = ClientInvitation.objects.get(user__username="admin@resend-client.example.test")
+        mail.outbox.clear()
+
+        response = self.client.post(reverse("api-super-admin-client-admin-resend-invite", kwargs={"client_number": client_number}))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn(response.json()["invitationUrl"], mail.outbox[0].body)
+
+        original_invite.refresh_from_db()
+        self.assertIsNotNone(original_invite.used_at)
+
+    def test_invitation_email_failure_does_not_block_client_creation(self):
+        platform_admin = User(username="clinic_admin", role=User.Role.SUPER_ADMIN, is_superuser=True)
+        platform_admin.set_password("safe-test-password")
+        platform_admin.full_clean()
+        platform_admin.save()
+        self.client.force_login(platform_admin)
+
+        with patch("care.notifications.send_mail", side_effect=OSError("smtp unavailable")):
+            response = self.client.post(
+                reverse("api-super-admin-client-create"),
+                data=json.dumps({
+                    "clientName": "Resilient Client", "clientEmail": "support@resilient-client.example.test",
+                    "addressLine1": "1 Resilient Way", "city": "Boston", "state": "MA", "zipCode": "02101",
+                    "subscriptionTier": "professional", "timezone": "America/New_York",
+                    "adminFirstName": "Resilient", "adminLastName": "Admin", "adminEmail": "admin@resilient-client.example.test",
+                }),
+                content_type="application/json",
+            )
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(Organization.objects.filter(name="Resilient Client").exists())
+
     def _platform_admin(self):
         platform_admin = User(
             username="clinic_admin",
@@ -1653,6 +1716,9 @@ class ClinicalWorkflowTests(TestCase):
                     "role": User.Role.THERAPIST,
                     "password": "Az9!AnotherPassword2026",
                     "confirmPassword": "Az9!AnotherPassword2026",
+                    "licenseNumber": "PT-3000",
+                    "licenseIssuingState": "NY",
+                    "licenseExpiresAt": (date.today() + timedelta(days=300)).isoformat(),
                 }
             ),
             content_type="application/json",
@@ -1775,6 +1841,9 @@ class ClinicalWorkflowTests(TestCase):
                     "role": User.Role.THERAPIST,
                     "password": "Az9!TenantSafePassword2026",
                     "confirmPassword": "Az9!TenantSafePassword2026",
+                    "licenseNumber": "PT-3001",
+                    "licenseIssuingState": "NC",
+                    "licenseExpiresAt": (date.today() + timedelta(days=300)).isoformat(),
                 }
             ),
             content_type="application/json",
@@ -1917,6 +1986,135 @@ class ClinicalWorkflowTests(TestCase):
         )
         self.assertEqual(second_attempt.status_code, 409)
 
+    def test_super_admin_can_restore_a_soft_deleted_tenant_user(self):
+        platform_admin = self._platform_admin()
+        staff = User.objects.create_user(
+            username="restore-me", password="safe-test-password", organization=self.organization, role=User.Role.SCHEDULER
+        )
+        self.client.force_login(platform_admin)
+        self.client.delete(reverse("api-super-admin-user-detail", kwargs={"user_id": staff.pk}))
+        staff.refresh_from_db()
+        self.assertIsNotNone(staff.archived_at)
+
+        response = self.client.patch(
+            reverse("api-super-admin-user-detail", kwargs={"user_id": staff.pk}),
+            data=json.dumps({"active": True, "archive": False}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        staff.refresh_from_db()
+        self.assertIsNone(staff.archived_at)
+        self.assertIsNone(staff.archived_by)
+        self.assertTrue(staff.is_active)
+
+        default_listing = self.client.get(reverse("api-super-admin-users"))
+        self.assertIn(str(staff.pk), {row["id"] for row in default_listing.json()["users"]})
+
+    def test_super_admin_can_change_a_tenant_users_username_and_password(self):
+        platform_admin = self._platform_admin()
+        staff = User.objects.create_user(
+            username="old-username", password="original-password", organization=self.organization, role=User.Role.SCHEDULER
+        )
+        self.client.force_login(platform_admin)
+
+        response = self.client.patch(
+            reverse("api-super-admin-user-detail", kwargs={"user_id": staff.pk}),
+            data=json.dumps({"username": "new-username", "password": "brand-new-password-123"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        staff.refresh_from_db()
+        self.assertEqual(staff.username, "new-username")
+        self.assertTrue(staff.check_password("brand-new-password-123"))
+        self.assertTrue(staff.must_change_password)
+
+    def test_admin_password_reset_forces_change_on_next_login(self):
+        platform_admin = self._platform_admin()
+        staff = User.objects.create_user(
+            username="forced-change-target", password="original-password", organization=self.organization, role=User.Role.SCHEDULER
+        )
+        self.client.force_login(platform_admin)
+        self.client.patch(
+            reverse("api-super-admin-user-detail", kwargs={"user_id": staff.pk}),
+            data=json.dumps({"password": "admin-set-password-123"}),
+            content_type="application/json",
+        )
+        staff.refresh_from_db()
+        self.assertTrue(staff.must_change_password)
+        self.client.logout()
+
+        self.client.force_login(staff)
+        blocked = self.client.get(reverse("api-dashboard"))
+        self.assertEqual(blocked.status_code, 403)
+
+        me_response = self.client.get(reverse("api-me"))
+        self.assertTrue(me_response.json()["user"]["mustChangePassword"])
+
+        change_response = self.client.post(
+            reverse("api-change-password"),
+            data=json.dumps({"newPassword": "my-own-new-password-456", "confirmPassword": "my-own-new-password-456"}),
+            content_type="application/json",
+        )
+        self.assertEqual(change_response.status_code, 200)
+        staff.refresh_from_db()
+        self.assertFalse(staff.must_change_password)
+        self.assertTrue(staff.check_password("my-own-new-password-456"))
+
+        allowed = self.client.get(reverse("api-dashboard"))
+        self.assertEqual(allowed.status_code, 200)
+
+    def test_forced_password_change_rejects_mismatched_confirmation(self):
+        staff = User.objects.create_user(
+            username="mismatch-target",
+            password="original-password",
+            organization=self.organization,
+            role=User.Role.SCHEDULER,
+            must_change_password=True,
+        )
+        self.client.force_login(staff)
+        response = self.client.post(
+            reverse("api-change-password"),
+            data=json.dumps({"newPassword": "my-own-new-password-456", "confirmPassword": "does-not-match"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+        staff.refresh_from_db()
+        self.assertTrue(staff.must_change_password)
+        self.assertTrue(staff.check_password("original-password"))
+
+    def test_super_admin_cannot_reuse_an_existing_username(self):
+        platform_admin = self._platform_admin()
+        User.objects.create_user(
+            username="taken-username", password="safe-test-password", organization=self.organization, role=User.Role.SCHEDULER
+        )
+        staff = User.objects.create_user(
+            username="other-username", password="safe-test-password", organization=self.organization, role=User.Role.SCHEDULER
+        )
+        self.client.force_login(platform_admin)
+        response = self.client.patch(
+            reverse("api-super-admin-user-detail", kwargs={"user_id": staff.pk}),
+            data=json.dumps({"username": "taken-username"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 422)
+        staff.refresh_from_db()
+        self.assertEqual(staff.username, "other-username")
+
+    def test_super_admin_password_reset_rejects_weak_password(self):
+        platform_admin = self._platform_admin()
+        staff = User.objects.create_user(
+            username="weak-pw-target", password="original-password", organization=self.organization, role=User.Role.SCHEDULER
+        )
+        self.client.force_login(platform_admin)
+        response = self.client.patch(
+            reverse("api-super-admin-user-detail", kwargs={"user_id": staff.pk}),
+            data=json.dumps({"password": "123"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 422)
+        staff.refresh_from_db()
+        self.assertTrue(staff.check_password("original-password"))
+
     def test_non_super_admin_cannot_edit_or_delete_tenant_users(self):
         self.therapist.role = User.Role.ADMIN
         self.therapist.save(update_fields=["role"])
@@ -1987,6 +2185,63 @@ class ClinicalWorkflowTests(TestCase):
 
         listing = self.client.get(reverse("api-org-users"))
         self.assertNotIn(str(staff.pk), {row["id"] for row in listing.json()["users"]})
+
+    def test_organization_admin_can_restore_own_soft_deleted_user(self):
+        org_admin = User.objects.create_user(
+            username="restore-admin", password="safe-test-password", organization=self.organization, role=User.Role.ADMIN
+        )
+        staff = User.objects.create_user(
+            username="restore-target", password="safe-test-password", organization=self.organization, role=User.Role.SCHEDULER
+        )
+        self.client.force_login(org_admin)
+        self.client.delete(reverse("api-org-user-detail", kwargs={"user_id": staff.pk}))
+        staff.refresh_from_db()
+        self.assertIsNotNone(staff.archived_at)
+
+        response = self.client.patch(
+            reverse("api-org-user-detail", kwargs={"user_id": staff.pk}),
+            data=json.dumps({"active": False, "archive": False}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        staff.refresh_from_db()
+        self.assertIsNone(staff.archived_at)
+        self.assertFalse(staff.is_active)
+
+        listing = self.client.get(reverse("api-org-users"))
+        self.assertIn(str(staff.pk), {row["id"] for row in listing.json()["users"]})
+
+    def test_organization_admin_can_reset_another_users_password_and_username(self):
+        org_admin = User.objects.create_user(
+            username="pw-reset-admin", password="safe-test-password", organization=self.organization, role=User.Role.ADMIN
+        )
+        staff = User.objects.create_user(
+            username="pw-reset-target", password="original-password", organization=self.organization, role=User.Role.SCHEDULER
+        )
+        self.client.force_login(org_admin)
+        response = self.client.patch(
+            reverse("api-org-user-detail", kwargs={"user_id": staff.pk}),
+            data=json.dumps({"username": "pw-reset-target-renamed", "password": "brand-new-password-123"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        staff.refresh_from_db()
+        self.assertEqual(staff.username, "pw-reset-target-renamed")
+        self.assertTrue(staff.check_password("brand-new-password-123"))
+
+    def test_organization_admin_cannot_reset_their_own_password_via_edit(self):
+        org_admin = User.objects.create_user(
+            username="self-pw-admin", password="original-password", organization=self.organization, role=User.Role.ADMIN
+        )
+        self.client.force_login(org_admin)
+        response = self.client.patch(
+            reverse("api-org-user-detail", kwargs={"user_id": org_admin.pk}),
+            data=json.dumps({"password": "brand-new-password-123"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 422)
+        org_admin.refresh_from_db()
+        self.assertTrue(org_admin.check_password("original-password"))
 
     def test_organization_admin_cannot_manage_users_in_another_org(self):
         org_admin = User.objects.create_user(
@@ -3081,3 +3336,1442 @@ class ChangePasswordTests(TestCase):
             content_type="application/json",
         )
         self.assertEqual(response.status_code, 401)
+
+
+class UserAccountStatusTests(TestCase):
+    """ACTIVE / INACTIVE / LOCKED_OUT / SUSPENDED / DELETED account status:
+    login gating, admin actions, self-protection, tenant isolation, and audit.
+    """
+
+    def setUp(self):
+        self.organization = Organization.objects.create(name="Status Clinic", slug="status-clinic")
+        self.admin = User.objects.create_user(
+            username="status-admin", password="safe-test-password", organization=self.organization, role=User.Role.ADMIN
+        )
+        self.second_admin = User.objects.create_user(
+            username="status-admin-2", password="safe-test-password", organization=self.organization, role=User.Role.ADMIN
+        )
+        self.staff = User.objects.create_user(
+            username="status-staff", password="safe-test-password", organization=self.organization, role=User.Role.SCHEDULER
+        )
+
+    def _platform_admin(self):
+        platform_admin = User(username="platform-admin", role=User.Role.SUPER_ADMIN, is_superuser=True)
+        platform_admin.set_password("safe-test-password")
+        platform_admin.full_clean()
+        platform_admin.save()
+        return platform_admin
+
+    def _login(self, username, password):
+        return self.client.post(
+            reverse("api-login"),
+            data=json.dumps({"username": username, "password": password}),
+            content_type="application/json",
+        )
+
+    # -- login gating per status -------------------------------------------------
+
+    def test_active_user_can_sign_in(self):
+        response = self._login("status-staff", "safe-test-password")
+        self.assertEqual(response.status_code, 200)
+
+    def test_inactive_user_cannot_sign_in(self):
+        self.staff.status = User.Status.INACTIVE
+        self.staff.is_active = False
+        self.staff.save(update_fields=["status", "is_active"])
+        response = self._login("status-staff", "safe-test-password")
+        self.assertEqual(response.status_code, 401)
+
+    def test_locked_out_user_cannot_sign_in(self):
+        self.staff.status = User.Status.LOCKED_OUT
+        self.staff.is_active = False
+        self.staff.locked_at = timezone.now()
+        self.staff.locked_until = timezone.now() + timedelta(minutes=15)
+        self.staff.save(update_fields=["status", "is_active", "locked_at", "locked_until"])
+        response = self._login("status-staff", "safe-test-password")
+        self.assertEqual(response.status_code, 401)
+
+    def test_suspended_user_cannot_sign_in(self):
+        self.staff.status = User.Status.SUSPENDED
+        self.staff.is_active = False
+        self.staff.suspended_at = timezone.now()
+        self.staff.save(update_fields=["status", "is_active", "suspended_at"])
+        response = self._login("status-staff", "safe-test-password")
+        self.assertEqual(response.status_code, 401)
+
+    def test_deleted_user_cannot_sign_in(self):
+        self.staff.status = User.Status.DELETED
+        self.staff.is_active = False
+        self.staff.archived_at = timezone.now()
+        self.staff.save(update_fields=["status", "is_active", "archived_at"])
+        response = self._login("status-staff", "safe-test-password")
+        self.assertEqual(response.status_code, 401)
+
+    def test_lockout_expiration_allows_login_again(self):
+        self.staff.status = User.Status.LOCKED_OUT
+        self.staff.is_active = False
+        self.staff.locked_at = timezone.now() - timedelta(minutes=20)
+        self.staff.locked_until = timezone.now() - timedelta(minutes=5)
+        self.staff.failed_login_attempts = 5
+        self.staff.save(update_fields=["status", "is_active", "locked_at", "locked_until", "failed_login_attempts"])
+        response = self._login("status-staff", "safe-test-password")
+        self.assertEqual(response.status_code, 200)
+        self.staff.refresh_from_db()
+        self.assertEqual(self.staff.status, User.Status.ACTIVE)
+        self.assertEqual(self.staff.failed_login_attempts, 0)
+
+    def test_five_failed_attempts_locks_the_account(self):
+        for _ in range(5):
+            response = self._login("status-staff", "wrong-password")
+            self.assertEqual(response.status_code, 401)
+        self.staff.refresh_from_db()
+        self.assertEqual(self.staff.status, User.Status.LOCKED_OUT)
+        self.assertEqual(self.staff.failed_login_attempts, 5)
+        self.assertIsNotNone(self.staff.locked_until)
+        self.assertTrue(AuditEvent.objects.filter(organization=self.organization, action="USER_LOCKED").exists())
+
+    def test_successful_login_resets_failed_attempts(self):
+        for _ in range(3):
+            self._login("status-staff", "wrong-password")
+        self.staff.refresh_from_db()
+        self.assertEqual(self.staff.failed_login_attempts, 3)
+        response = self._login("status-staff", "safe-test-password")
+        self.assertEqual(response.status_code, 200)
+        self.staff.refresh_from_db()
+        self.assertEqual(self.staff.failed_login_attempts, 0)
+
+    # -- admin actions -------------------------------------------------------
+
+    def test_admin_can_deactivate_and_activate_a_user(self):
+        self.client.force_login(self.admin)
+        response = self.client.post(
+            reverse("api-org-user-status-action", kwargs={"user_id": self.staff.pk}),
+            data=json.dumps({"action": "deactivate"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.staff.refresh_from_db()
+        self.assertEqual(self.staff.status, User.Status.INACTIVE)
+        self.assertFalse(self.staff.is_active)
+        self.assertTrue(AuditEvent.objects.filter(action="USER_DEACTIVATED", object_id=self.staff.pk).exists())
+
+        response = self.client.post(
+            reverse("api-org-user-status-action", kwargs={"user_id": self.staff.pk}),
+            data=json.dumps({"action": "activate"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.staff.refresh_from_db()
+        self.assertEqual(self.staff.status, User.Status.ACTIVE)
+        self.assertTrue(self.staff.is_active)
+
+    def test_admin_can_suspend_and_reactivate_a_user(self):
+        self.client.force_login(self.admin)
+        response = self.client.post(
+            reverse("api-org-user-status-action", kwargs={"user_id": self.staff.pk}),
+            data=json.dumps({"action": "suspend", "reason": "Policy violation"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.staff.refresh_from_db()
+        self.assertEqual(self.staff.status, User.Status.SUSPENDED)
+        self.assertEqual(self.staff.suspension_reason, "Policy violation")
+        self.assertEqual(self.staff.suspended_by, self.admin)
+
+        response = self.client.post(
+            reverse("api-org-user-status-action", kwargs={"user_id": self.staff.pk}),
+            data=json.dumps({"action": "reactivate"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.staff.refresh_from_db()
+        self.assertEqual(self.staff.status, User.Status.ACTIVE)
+        self.assertEqual(self.staff.suspension_reason, "")
+
+    def test_admin_can_unlock_a_locked_account(self):
+        self.staff.status = User.Status.LOCKED_OUT
+        self.staff.is_active = False
+        self.staff.failed_login_attempts = 5
+        self.staff.locked_at = timezone.now()
+        self.staff.locked_until = timezone.now() + timedelta(minutes=15)
+        self.staff.save(update_fields=["status", "is_active", "failed_login_attempts", "locked_at", "locked_until"])
+        self.client.force_login(self.admin)
+        response = self.client.post(
+            reverse("api-org-user-status-action", kwargs={"user_id": self.staff.pk}),
+            data=json.dumps({"action": "unlock"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.staff.refresh_from_db()
+        self.assertEqual(self.staff.status, User.Status.ACTIVE)
+        self.assertTrue(self.staff.is_active)
+        self.assertEqual(self.staff.failed_login_attempts, 0)
+        self.assertIsNone(self.staff.locked_until)
+        self.assertTrue(AuditEvent.objects.filter(action="USER_UNLOCKED", object_id=self.staff.pk).exists())
+
+    def test_unauthorized_staff_cannot_unlock_users(self):
+        self.client.force_login(self.staff)
+        response = self.client.post(
+            reverse("api-org-user-status-action", kwargs={"user_id": self.staff.pk}),
+            data=json.dumps({"action": "unlock"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_platform_super_admin_can_delete_and_restore_a_user(self):
+        platform_admin = self._platform_admin()
+        self.client.force_login(platform_admin)
+        response = self.client.post(
+            reverse("api-super-admin-user-status-action", kwargs={"user_id": self.staff.pk}),
+            data=json.dumps({"action": "delete"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.staff.refresh_from_db()
+        self.assertEqual(self.staff.status, User.Status.DELETED)
+        self.assertIsNotNone(self.staff.archived_at)
+        self.assertTrue(User.objects.filter(pk=self.staff.pk).exists())
+
+        response = self.client.post(
+            reverse("api-super-admin-user-status-action", kwargs={"user_id": self.staff.pk}),
+            data=json.dumps({"action": "restore"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.staff.refresh_from_db()
+        self.assertEqual(self.staff.status, User.Status.ACTIVE)
+        self.assertIsNone(self.staff.archived_at)
+        self.assertTrue(self.staff.is_active)
+
+    # -- self-protection -------------------------------------------------------
+
+    def test_admin_cannot_change_their_own_account_status(self):
+        self.client.force_login(self.admin)
+        for action in ("deactivate", "suspend"):
+            response = self.client.post(
+                reverse("api-org-user-status-action", kwargs={"user_id": self.admin.pk}),
+                data=json.dumps({"action": action}),
+                content_type="application/json",
+            )
+            self.assertEqual(response.status_code, 422)
+        self.admin.refresh_from_db()
+        self.assertEqual(self.admin.status, User.Status.ACTIVE)
+
+    # -- tenant isolation -------------------------------------------------------
+
+    def test_tenant_isolation_prevents_cross_org_status_changes(self):
+        other_org = Organization.objects.create(name="Other Clinic", slug="other-status-clinic")
+        other_admin = User.objects.create_user(
+            username="other-admin", password="safe-test-password", organization=other_org, role=User.Role.ADMIN
+        )
+        self.client.force_login(other_admin)
+        response = self.client.post(
+            reverse("api-org-user-status-action", kwargs={"user_id": self.staff.pk}),
+            data=json.dumps({"action": "deactivate"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 404)
+        self.staff.refresh_from_db()
+        self.assertEqual(self.staff.status, User.Status.ACTIVE)
+
+    # -- mid-session revocation -------------------------------------------------
+
+    def test_deactivating_a_user_immediately_blocks_their_existing_session(self):
+        """Django's ModelBackend re-checks `is_active` on every request (not
+        just at login), so an existing session stops working on its very next
+        request once an admin deactivates the account — no extra code needed
+        for this; it's already how the framework's default backend behaves.
+        """
+        self.client.force_login(self.staff)
+        ok_response = self.client.get(reverse("api-dashboard"))
+        self.assertEqual(ok_response.status_code, 200)
+
+        self.staff.status = User.Status.INACTIVE
+        self.staff.is_active = False
+        self.staff.save(update_fields=["status", "is_active"])
+
+        blocked_response = self.client.get(reverse("api-dashboard"))
+        self.assertEqual(blocked_response.status_code, 401)
+
+    # -- list filtering -------------------------------------------------------
+
+    def test_status_filters_in_organization_user_list(self):
+        self.staff.status = User.Status.SUSPENDED
+        self.staff.is_active = False
+        self.staff.suspended_at = timezone.now()
+        self.staff.save(update_fields=["status", "is_active", "suspended_at"])
+        self.client.force_login(self.admin)
+
+        # The default (unfiltered) list still includes suspended/inactive/locked
+        # accounts — like a soft-deleted user, only DELETED is hidden unless asked for.
+        default_listing = self.client.get(reverse("api-org-users"))
+        self.assertIn(str(self.staff.pk), {row["id"] for row in default_listing.json()["users"]})
+
+        suspended_listing = self.client.get(reverse("api-org-users"), {"status": "suspended"})
+        ids = {row["id"] for row in suspended_listing.json()["users"]}
+        self.assertIn(str(self.staff.pk), ids)
+        row = next(row for row in suspended_listing.json()["users"] if row["id"] == str(self.staff.pk))
+        self.assertEqual(row["status"], "suspended")
+        self.assertEqual(row["statusLabel"], "Suspended")
+
+
+class SessionManagementTests(TestCase):
+    """Per-device session tracking: concurrency limits, revocation on new
+    login, account-status/password integration, idle/absolute timeout, and
+    self-service session management. Each "browser" is a separate `Client()`
+    instance sharing no cookies with the others.
+    """
+
+    def setUp(self):
+        self.organization = Organization.objects.create(name="Session Clinic", slug="session-clinic")
+        self.admin = User.objects.create_user(
+            username="session-admin", password="safe-test-password", organization=self.organization, role=User.Role.ADMIN
+        )
+        self.scheduler = User.objects.create_user(
+            username="session-scheduler", password="safe-test-password", organization=self.organization, role=User.Role.SCHEDULER
+        )
+        self.therapist = User.objects.create_user(
+            username="session-therapist", password="safe-test-password", organization=self.organization, role=User.Role.THERAPIST
+        )
+
+    def _login(self, client, username, password="safe-test-password"):
+        return client.post(
+            reverse("api-login"),
+            data=json.dumps({"username": username, "password": password}),
+            content_type="application/json",
+        )
+
+    def test_new_login_revokes_previous_session_for_single_session_role(self):
+        browser_a = Client()
+        browser_b = Client()
+        self.assertEqual(self._login(browser_a, "session-scheduler").status_code, 200)
+        ok = browser_a.get(reverse("api-dashboard"))
+        self.assertEqual(ok.status_code, 200)
+
+        self.assertEqual(self._login(browser_b, "session-scheduler").status_code, 200)
+
+        blocked = browser_a.get(reverse("api-dashboard"))
+        self.assertEqual(blocked.status_code, 401)
+        self.assertEqual(blocked.json().get("code"), "NEW_LOGIN")
+        self.assertIn("another browser or device", blocked.json()["detail"])
+
+        still_ok = browser_b.get(reverse("api-dashboard"))
+        self.assertEqual(still_ok.status_code, 200)
+
+    def test_role_with_two_session_limit_keeps_both(self):
+        browser_a = Client()
+        browser_b = Client()
+        self._login(browser_a, "session-therapist")
+        self._login(browser_b, "session-therapist")
+        self.assertEqual(browser_a.get(reverse("api-dashboard")).status_code, 200)
+        self.assertEqual(browser_b.get(reverse("api-dashboard")).status_code, 200)
+
+    def test_third_login_revokes_oldest_session_for_two_session_role(self):
+        browser_a = Client()
+        browser_b = Client()
+        browser_c = Client()
+        self._login(browser_a, "session-therapist")
+        self._login(browser_b, "session-therapist")
+        self._login(browser_c, "session-therapist")
+
+        self.assertEqual(browser_a.get(reverse("api-dashboard")).status_code, 401)
+        self.assertEqual(browser_b.get(reverse("api-dashboard")).status_code, 200)
+        self.assertEqual(browser_c.get(reverse("api-dashboard")).status_code, 200)
+
+    def test_suspending_a_user_revokes_their_active_session(self):
+        browser = Client()
+        self._login(browser, "session-scheduler")
+        self.assertEqual(browser.get(reverse("api-dashboard")).status_code, 200)
+
+        self.client.force_login(self.admin)
+        response = self.client.post(
+            reverse("api-org-user-status-action", kwargs={"user_id": self.scheduler.pk}),
+            data=json.dumps({"action": "suspend", "reason": "test"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+
+        blocked = browser.get(reverse("api-dashboard"))
+        self.assertEqual(blocked.status_code, 401)
+        self.assertEqual(blocked.json().get("code"), "ACCOUNT_SUSPENDED")
+
+    def test_deactivating_a_user_revokes_their_session(self):
+        browser = Client()
+        self._login(browser, "session-scheduler")
+        self.client.force_login(self.admin)
+        self.client.post(
+            reverse("api-org-user-status-action", kwargs={"user_id": self.scheduler.pk}),
+            data=json.dumps({"action": "deactivate"}),
+            content_type="application/json",
+        )
+        response = browser.get(reverse("api-dashboard"))
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json().get("code"), "ACCOUNT_DEACTIVATED")
+
+    def test_deleting_a_user_revokes_their_session(self):
+        browser = Client()
+        self._login(browser, "session-therapist")
+        self.client.force_login(self.admin)
+        self.client.post(
+            reverse("api-org-user-status-action", kwargs={"user_id": self.therapist.pk}),
+            data=json.dumps({"action": "delete"}),
+            content_type="application/json",
+        )
+        response = browser.get(reverse("api-dashboard"))
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json().get("code"), "ACCOUNT_DELETED")
+
+    def test_admin_password_reset_revokes_all_of_the_users_sessions(self):
+        browser = Client()
+        self._login(browser, "session-scheduler")
+        self.assertEqual(browser.get(reverse("api-dashboard")).status_code, 200)
+
+        self.client.force_login(self.admin)
+        response = self.client.patch(
+            reverse("api-org-user-detail", kwargs={"user_id": self.scheduler.pk}),
+            data=json.dumps({"password": "brand-new-password-123"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+
+        blocked = browser.get(reverse("api-dashboard"))
+        self.assertEqual(blocked.status_code, 401)
+        self.assertEqual(blocked.json().get("code"), "PASSWORD_RESET")
+
+    def test_self_service_password_change_keeps_current_session_revokes_others(self):
+        # Use the therapist role (session limit 2) so both logins survive —
+        # a 1-session role would revoke browser_a the instant browser_b logs
+        # in, unrelated to what this test is actually checking.
+        browser_a = Client()
+        browser_b = Client()
+        self._login(browser_a, "session-therapist")
+        self._login(browser_b, "session-therapist")
+
+        response = browser_a.post(
+            reverse("api-change-password"),
+            data=json.dumps({"currentPassword": "safe-test-password", "newPassword": "brand-new-password-456"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+
+        self.assertEqual(browser_a.get(reverse("api-dashboard")).status_code, 200)
+        blocked = browser_b.get(reverse("api-dashboard"))
+        self.assertEqual(blocked.status_code, 401)
+        self.assertEqual(blocked.json().get("code"), "PASSWORD_CHANGED")
+
+    def test_admin_can_sign_user_out_of_all_devices(self):
+        browser_a = Client()
+        browser_b = Client()
+        self._login(browser_a, "session-therapist")
+        self._login(browser_b, "session-therapist")
+
+        self.client.force_login(self.admin)
+        response = self.client.post(
+            reverse("api-org-user-revoke-sessions", kwargs={"user_id": self.therapist.pk}),
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["revokedCount"], 2)
+        self.assertTrue(AuditEvent.objects.filter(action="SESSION_REVOKED", object_id__in=[
+            s.pk for s in UserSession.objects.filter(user=self.therapist)
+        ]).exists())
+
+        self.assertEqual(browser_a.get(reverse("api-dashboard")).status_code, 401)
+        self.assertEqual(browser_b.get(reverse("api-dashboard")).status_code, 401)
+
+    def test_self_service_session_listing_and_revocation(self):
+        browser_a = Client()
+        browser_b = Client()
+        self._login(browser_a, "session-therapist")
+        self._login(browser_b, "session-therapist")
+
+        listing = browser_a.get(reverse("api-my-sessions"))
+        self.assertEqual(listing.status_code, 200)
+        sessions = listing.json()["sessions"]
+        self.assertEqual(len(sessions), 2)
+        current = next(s for s in sessions if s["isCurrent"])
+        other = next(s for s in sessions if not s["isCurrent"])
+
+        revoke_response = browser_a.post(reverse("api-revoke-my-session", kwargs={"session_id": other["id"]}))
+        self.assertEqual(revoke_response.status_code, 200)
+        self.assertEqual(browser_b.get(reverse("api-dashboard")).status_code, 401)
+        self.assertEqual(browser_a.get(reverse("api-dashboard")).status_code, 200)
+
+        cannot_revoke_self = browser_a.post(reverse("api-revoke-my-session", kwargs={"session_id": current["id"]}))
+        self.assertEqual(cannot_revoke_self.status_code, 400)
+
+    def test_revoke_all_other_sessions_keeps_current(self):
+        browser_a = Client()
+        browser_b = Client()
+        browser_c = Client()
+        self._login(browser_a, "session-therapist")
+        self._login(browser_b, "session-therapist")
+        # third login would normally revoke the oldest (browser_a) under the
+        # 2-session limit, so revoke browser_b's own "others" instead here
+        response = browser_b.post(reverse("api-revoke-my-other-sessions"))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(browser_b.get(reverse("api-dashboard")).status_code, 200)
+        self.assertEqual(browser_a.get(reverse("api-dashboard")).status_code, 401)
+
+    def test_logout_revokes_the_current_session(self):
+        browser = Client()
+        self._login(browser, "session-scheduler")
+        session = UserSession.objects.get(user=self.scheduler)
+        self.assertTrue(session.is_active)
+        browser.post(reverse("api-logout"))
+        session.refresh_from_db()
+        self.assertIsNotNone(session.revoked_at)
+        self.assertEqual(session.revoked_reason, UserSession.RevokedReason.USER_LOGOUT)
+
+    def test_idle_timeout_ends_the_session(self):
+        browser = Client()
+        self._login(browser, "session-scheduler")
+        session = UserSession.objects.get(user=self.scheduler)
+        session.last_activity_at = timezone.now() - timedelta(minutes=20)
+        session.save(update_fields=["last_activity_at"])
+
+        response = browser.get(reverse("api-dashboard"))
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json().get("code"), "IDLE_TIMEOUT")
+        session.refresh_from_db()
+        self.assertEqual(session.revoked_reason, UserSession.RevokedReason.IDLE_TIMEOUT)
+
+    def test_absolute_timeout_ends_the_session(self):
+        browser = Client()
+        self._login(browser, "session-scheduler")
+        session = UserSession.objects.get(user=self.scheduler)
+        session.expires_at = timezone.now() - timedelta(minutes=1)
+        session.save(update_fields=["expires_at"])
+
+        response = browser.get(reverse("api-dashboard"))
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json().get("code"), "ABSOLUTE_TIMEOUT")
+
+    def test_untracked_legacy_session_is_not_blocked(self):
+        """`force_login()` bypasses the login() view entirely, so no
+        UserSession row exists for it — this must fail open, not break every
+        other test in the suite that relies on `force_login()`.
+        """
+        self.client.force_login(self.scheduler)
+        response = self.client.get(reverse("api-dashboard"))
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(UserSession.objects.filter(user=self.scheduler).exists())
+
+    def test_account_lockout_revokes_an_existing_session(self):
+        browser = Client()
+        self._login(browser, "session-scheduler")
+        self.assertEqual(browser.get(reverse("api-dashboard")).status_code, 200)
+
+        attacker = Client()
+        for _ in range(5):
+            self._login(attacker, "session-scheduler", password="wrong-password")
+
+        response = browser.get(reverse("api-dashboard"))
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json().get("code"), "ACCOUNT_LOCKED")
+
+    def test_organization_admin_cannot_revoke_sessions_for_another_orgs_user(self):
+        other_org = Organization.objects.create(name="Other Session Org", slug="other-session-org")
+        other_admin = User.objects.create_user(
+            username="other-session-admin", password="safe-test-password", organization=other_org, role=User.Role.ADMIN
+        )
+        self.client.force_login(other_admin)
+        response = self.client.post(
+            reverse("api-org-user-revoke-sessions", kwargs={"user_id": self.scheduler.pk}),
+        )
+        self.assertEqual(response.status_code, 404)
+
+
+class LicenseExpirationTests(TestCase):
+    """PT/PTA license onboarding, expiry alerts, and auto-suspend."""
+
+    def setUp(self):
+        self.organization = Organization.objects.create(name="License Clinic", slug="license-clinic")
+        self.admin = User.objects.create_user(
+            username="license-admin", password="safe-test-password", organization=self.organization, role=User.Role.ADMIN
+        )
+        self.therapist = User.objects.create_user(
+            username="license-therapist", password="safe-test-password", organization=self.organization, role=User.Role.THERAPIST
+        )
+        self.license = UserLicense.objects.create(
+            user=self.therapist, license_number="PT-1000", issuing_state="NC",
+            expires_at=date.today() + timedelta(days=200),
+            verification_status=UserLicense.VerificationStatus.VERIFIED,
+        )
+
+    def _login(self, username, password="safe-test-password"):
+        return self.client.post(
+            reverse("api-login"),
+            data=json.dumps({"username": username, "password": password}),
+            content_type="application/json",
+        )
+
+    def _create_payload(self, **overrides):
+        payload = {
+            "username": "new-therapist",
+            "firstName": "New",
+            "lastName": "Therapist",
+            "email": "new-therapist@example.com",
+            "role": User.Role.THERAPIST,
+            "password": "another-safe-password9",
+            "confirmPassword": "another-safe-password9",
+            "licenseNumber": "PT-2000",
+            "licenseIssuingState": "CA",
+            "licenseExpiresAt": (date.today() + timedelta(days=30)).isoformat(),
+        }
+        payload.update(overrides)
+        return payload
+
+    # -- onboarding validation ----------------------------------------------
+
+    def test_creating_a_therapist_requires_license_fields(self):
+        self.client.force_login(self.admin)
+        payload = self._create_payload(licenseNumber="", licenseIssuingState="", licenseExpiresAt="")
+        response = self.client.post(
+            reverse("api-org-users"), data=json.dumps(payload), content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 422)
+        errors = response.json()["errors"]
+        self.assertIn("licenseNumber", errors)
+        self.assertIn("licenseIssuingState", errors)
+        self.assertIn("licenseExpiresAt", errors)
+
+    def test_creating_a_therapist_with_license_fields_succeeds(self):
+        self.client.force_login(self.admin)
+        response = self.client.post(
+            reverse("api-org-users"), data=json.dumps(self._create_payload()), content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 201)
+        body = response.json()["user"]
+        self.assertEqual(len(body["licenses"]), 1)
+        self.assertEqual(body["licenses"][0]["licenseNumber"], "PT-2000")
+        self.assertEqual(body["licenses"][0]["issuingState"], "CA")
+        self.assertEqual(body["licenseAlertStatus"], "expiring_soon")
+
+    def test_creating_a_scheduler_does_not_require_license_fields(self):
+        self.client.force_login(self.admin)
+        payload = self._create_payload(
+            username="new-scheduler", role=User.Role.SCHEDULER,
+            licenseNumber="", licenseIssuingState="", licenseExpiresAt="",
+        )
+        response = self.client.post(
+            reverse("api-org-users"), data=json.dumps(payload), content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 201)
+
+    def test_invalid_license_date_format_is_rejected(self):
+        self.client.force_login(self.admin)
+        payload = self._create_payload(licenseExpiresAt="not-a-date")
+        response = self.client.post(
+            reverse("api-org-users"), data=json.dumps(payload), content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("licenseExpiresAt", response.json()["errors"])
+
+    # -- license_alert_status / license_days_remaining -----------------------
+
+    def test_license_alert_status_boundaries(self):
+        self.license.expires_at = date.today() + timedelta(days=90)
+        self.license.save(update_fields=["expires_at"])
+        self.assertEqual(self.therapist.license_alert_status, "expiring_soon")
+        self.license.expires_at = date.today() + timedelta(days=91)
+        self.license.save(update_fields=["expires_at"])
+        self.assertEqual(self.therapist.license_alert_status, "valid")
+        self.license.expires_at = date.today() + timedelta(days=14)
+        self.license.save(update_fields=["expires_at"])
+        self.assertEqual(self.therapist.license_alert_status, "critical")
+        self.license.expires_at = date.today() - timedelta(days=1)
+        self.license.save(update_fields=["expires_at"])
+        self.assertEqual(self.therapist.license_alert_status, "expired")
+        self.license.delete()
+        self.assertEqual(self.therapist.license_alert_status, "none")
+
+    def test_license_alert_status_is_none_for_non_clinician_roles(self):
+        scheduler = User.objects.create_user(
+            username="license-scheduler", password="safe-test-password", organization=self.organization, role=User.Role.SCHEDULER
+        )
+        UserLicense.objects.create(
+            user=scheduler, license_number="X-1", issuing_state="NC", expires_at=date.today() - timedelta(days=1)
+        )
+        self.assertEqual(scheduler.license_alert_status, "none")
+
+    # -- auto-suspend on login -------------------------------------------------
+
+    def test_login_auto_suspends_a_therapist_with_an_expired_license(self):
+        self.license.expires_at = date.today() - timedelta(days=1)
+        self.license.save(update_fields=["expires_at"])
+        response = self._login("license-therapist")
+        self.assertEqual(response.status_code, 401)
+        self.therapist.refresh_from_db()
+        self.assertEqual(self.therapist.status, User.Status.SUSPENDED)
+        self.assertFalse(self.therapist.is_active)
+        self.assertIsNone(self.therapist.suspended_by)
+        event = AuditEvent.objects.get(action="USER_LICENSE_EXPIRED", object_id=self.therapist.pk)
+        self.assertIsNone(event.actor)
+        self.assertEqual(event.metadata["expired_licenses"][0]["license_number"], "PT-1000")
+
+    def test_login_does_not_suspend_a_therapist_with_a_valid_license(self):
+        response = self._login("license-therapist")
+        self.assertEqual(response.status_code, 200)
+        self.therapist.refresh_from_db()
+        self.assertEqual(self.therapist.status, User.Status.ACTIVE)
+
+    def test_non_clinician_role_with_a_stray_past_date_is_never_auto_suspended(self):
+        scheduler = User.objects.create_user(
+            username="license-scheduler-2", password="safe-test-password", organization=self.organization, role=User.Role.SCHEDULER
+        )
+        UserLicense.objects.create(
+            user=scheduler, license_number="X-2", issuing_state="NC", expires_at=date.today() - timedelta(days=1)
+        )
+        response = self._login("license-scheduler-2")
+        self.assertEqual(response.status_code, 200)
+        scheduler.refresh_from_db()
+        self.assertEqual(scheduler.status, User.Status.ACTIVE)
+
+    def test_expired_license_auto_suspend_revokes_active_sessions(self):
+        self._login("license-therapist")
+        self.assertTrue(UserSession.objects.filter(user=self.therapist, revoked_at__isnull=True).exists())
+        self.license.expires_at = date.today() - timedelta(days=1)
+        self.license.save(update_fields=["expires_at"])
+        self._login("license-therapist")
+        self.assertFalse(UserSession.objects.filter(user=self.therapist, revoked_at__isnull=True).exists())
+
+    # -- auto-suspend via admin list view (lazy sweep) --------------------------
+
+    def test_org_admin_list_view_sweeps_and_suspends_an_expired_therapist(self):
+        self.license.expires_at = date.today() - timedelta(days=1)
+        self.license.save(update_fields=["expires_at"])
+        self.client.force_login(self.admin)
+        response = self.client.get(reverse("api-org-users"))
+        self.assertEqual(response.status_code, 200)
+        body = {user["id"]: user for user in response.json()["users"]}
+        self.assertEqual(body[str(self.therapist.pk)]["status"], "suspended")
+        self.therapist.refresh_from_db()
+        self.assertEqual(self.therapist.status, User.Status.SUSPENDED)
+
+    def test_super_admin_list_view_sweeps_across_all_clients(self):
+        platform_admin = User(username="license-platform-admin", role=User.Role.SUPER_ADMIN, is_superuser=True)
+        platform_admin.set_password("safe-test-password")
+        platform_admin.full_clean()
+        platform_admin.save()
+        self.license.expires_at = date.today() - timedelta(days=1)
+        self.license.save(update_fields=["expires_at"])
+        self.client.force_login(platform_admin)
+        response = self.client.get(reverse("api-super-admin-users"))
+        self.assertEqual(response.status_code, 200)
+        self.therapist.refresh_from_db()
+        self.assertEqual(self.therapist.status, User.Status.SUSPENDED)
+
+    # -- editing license fields ------------------------------------------------
+
+    def test_editing_license_expiration_updates_the_field_and_resets_verification(self):
+        self.client.force_login(self.admin)
+        new_date = (date.today() + timedelta(days=10)).isoformat()
+        response = self.client.patch(
+            reverse("api-org-user-license-detail", kwargs={"user_id": self.therapist.pk, "license_id": self.license.pk}),
+            data=json.dumps({"expiresAt": new_date}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.license.refresh_from_db()
+        self.assertEqual(self.license.expires_at.isoformat(), new_date)
+        self.assertEqual(self.license.verification_status, UserLicense.VerificationStatus.PENDING_VERIFICATION)
+        self.therapist.refresh_from_db()
+        self.assertEqual(self.therapist.status, User.Status.ACTIVE)
+
+    def test_renewing_a_license_on_a_suspended_user_does_not_auto_reactivate(self):
+        self.license.expires_at = date.today() - timedelta(days=1)
+        self.license.save(update_fields=["expires_at"])
+        self._login("license-therapist")
+        self.therapist.refresh_from_db()
+        self.assertEqual(self.therapist.status, User.Status.SUSPENDED)
+
+        self.client.force_login(self.admin)
+        new_date = (date.today() + timedelta(days=365)).isoformat()
+        response = self.client.patch(
+            reverse("api-org-user-license-detail", kwargs={"user_id": self.therapist.pk, "license_id": self.license.pk}),
+            data=json.dumps({"expiresAt": new_date}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.license.refresh_from_db()
+        self.assertEqual(self.license.expires_at.isoformat(), new_date)
+        self.therapist.refresh_from_db()
+        self.assertEqual(self.therapist.status, User.Status.SUSPENDED)
+
+    # -- management command -----------------------------------------------------
+
+    def test_check_license_expirations_command_sweeps_multiple_organizations(self):
+        other_org = Organization.objects.create(name="Other License Clinic", slug="other-license-clinic")
+        other_therapist = User.objects.create_user(
+            username="other-license-therapist", password="safe-test-password", organization=other_org, role=User.Role.ASSISTANT
+        )
+        UserLicense.objects.create(
+            user=other_therapist, license_number="PTA-999", issuing_state="TX", expires_at=date.today() - timedelta(days=5)
+        )
+        self.license.expires_at = date.today() - timedelta(days=1)
+        self.license.save(update_fields=["expires_at"])
+
+        call_command("check_license_expirations")
+
+        self.therapist.refresh_from_db()
+        other_therapist.refresh_from_db()
+        self.assertEqual(self.therapist.status, User.Status.SUSPENDED)
+        self.assertEqual(other_therapist.status, User.Status.SUSPENDED)
+
+
+class UserLicenseTests(TestCase):
+    """Multiple licenses per PT/PTA, document upload/verification, and the
+    verify-before-reactivate requirement."""
+
+    def setUp(self):
+        self.organization = Organization.objects.create(name="Multi License Clinic", slug="multi-license-clinic")
+        self.admin = User.objects.create_user(
+            username="ml-admin", password="safe-test-password", organization=self.organization, role=User.Role.ADMIN
+        )
+        self.therapist = User.objects.create_user(
+            username="ml-therapist", password="safe-test-password", organization=self.organization, role=User.Role.THERAPIST
+        )
+        self.license = UserLicense.objects.create(
+            user=self.therapist, license_number="PT-100", issuing_state="NC",
+            expires_at=date.today() + timedelta(days=200),
+        )
+
+    def _licenses_url(self):
+        return reverse("api-org-user-licenses", kwargs={"user_id": self.therapist.pk})
+
+    def _license_detail_url(self, license=None):
+        return reverse(
+            "api-org-user-license-detail",
+            kwargs={"user_id": self.therapist.pk, "license_id": (license or self.license).pk},
+        )
+
+    def _document_url(self, license=None):
+        return reverse(
+            "api-org-user-license-document",
+            kwargs={"user_id": self.therapist.pk, "license_id": (license or self.license).pk},
+        )
+
+    def _verify_url(self, license=None):
+        return reverse(
+            "api-org-user-license-verify",
+            kwargs={"user_id": self.therapist.pk, "license_id": (license or self.license).pk},
+        )
+
+    # -- multi-license CRUD -------------------------------------------------
+
+    def test_admin_can_add_a_second_license_for_a_different_state(self):
+        self.client.force_login(self.admin)
+        response = self.client.post(
+            self._licenses_url(),
+            data=json.dumps({"licenseNumber": "PT-200", "issuingState": "VA", "expiresAt": (date.today() + timedelta(days=100)).isoformat()}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(self.therapist.licenses.count(), 2)
+
+    def test_duplicate_license_for_same_state_and_number_is_rejected(self):
+        self.client.force_login(self.admin)
+        response = self.client.post(
+            self._licenses_url(),
+            data=json.dumps({"licenseNumber": "PT-100", "issuingState": "NC", "expiresAt": (date.today() + timedelta(days=100)).isoformat()}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 422)
+
+    def test_admin_can_delete_a_license(self):
+        self.client.force_login(self.admin)
+        response = self.client.delete(self._license_detail_url())
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.therapist.licenses.count(), 0)
+
+    # -- document upload / download -----------------------------------------
+
+    def test_admin_can_upload_a_license_document(self):
+        self.client.force_login(self.admin)
+        upload = SimpleUploadedFile("license.pdf", b"%PDF-1.4 fake license document", content_type="application/pdf")
+        response = self.client.post(self._document_url(), {"file": upload})
+        self.assertEqual(response.status_code, 201)
+        self.license.refresh_from_db()
+        self.assertTrue(bool(self.license.document))
+        self.assertEqual(self.license.verification_status, UserLicense.VerificationStatus.PENDING_VERIFICATION)
+
+    def test_unsupported_document_type_is_rejected(self):
+        self.client.force_login(self.admin)
+        upload = SimpleUploadedFile("script.exe", b"MZ fake executable", content_type="application/octet-stream")
+        response = self.client.post(self._document_url(), {"file": upload})
+        self.assertEqual(response.status_code, 422)
+
+    def test_admin_can_download_an_uploaded_license_document(self):
+        self.client.force_login(self.admin)
+        upload = SimpleUploadedFile("license.pdf", b"%PDF-1.4 fake license document", content_type="application/pdf")
+        self.client.post(self._document_url(), {"file": upload})
+        response = self.client.get(self._document_url())
+        self.assertEqual(response.status_code, 200)
+
+    def test_another_organizations_admin_cannot_download_this_license_document(self):
+        self.client.force_login(self.admin)
+        upload = SimpleUploadedFile("license.pdf", b"%PDF-1.4 fake license document", content_type="application/pdf")
+        self.client.post(self._document_url(), {"file": upload})
+        self.client.logout()
+
+        other_org = Organization.objects.create(name="Other Multi License Clinic", slug="other-multi-license-clinic")
+        other_admin = User.objects.create_user(
+            username="ml-other-admin", password="safe-test-password", organization=other_org, role=User.Role.ADMIN
+        )
+        self.client.force_login(other_admin)
+        response = self.client.get(self._document_url())
+        self.assertEqual(response.status_code, 404)
+
+    # -- verification ---------------------------------------------------------
+
+    def test_verifying_requires_a_document_first(self):
+        self.client.force_login(self.admin)
+        response = self.client.post(self._verify_url(), data=json.dumps({}), content_type="application/json")
+        self.assertEqual(response.status_code, 422)
+
+    def test_admin_can_verify_a_license_with_a_document(self):
+        self.client.force_login(self.admin)
+        upload = SimpleUploadedFile("license.pdf", b"%PDF-1.4 fake license document", content_type="application/pdf")
+        self.client.post(self._document_url(), {"file": upload})
+        response = self.client.post(
+            self._verify_url(), data=json.dumps({"notes": "Checked against the state board site."}), content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.license.refresh_from_db()
+        self.assertEqual(self.license.verification_status, UserLicense.VerificationStatus.VERIFIED)
+        self.assertEqual(self.license.verified_by, self.admin)
+        self.assertIsNotNone(self.license.verified_at)
+        event = AuditEvent.objects.get(action="provider_license.verified", object_id=self.license.pk)
+        self.assertEqual(event.actor, self.admin)
+
+    def test_non_admin_cannot_verify_a_license(self):
+        scheduler = User.objects.create_user(
+            username="ml-scheduler", password="safe-test-password", organization=self.organization, role=User.Role.SCHEDULER
+        )
+        self.client.force_login(scheduler)
+        response = self.client.post(self._verify_url(), data=json.dumps({}), content_type="application/json")
+        self.assertEqual(response.status_code, 403)
+
+    # -- escalating alert tiers -------------------------------------------------
+
+    def test_alert_tier_escalates_at_each_threshold(self):
+        cases = [
+            (91, "valid"), (90, "expiring_90"), (60, "expiring_60"), (30, "expiring_30"),
+            (14, "critical_14"), (7, "critical_7"), (0, "critical_7"), (-1, "expired"),
+        ]
+        for days, expected_tier in cases:
+            self.license.expires_at = date.today() + timedelta(days=days)
+            self.assertEqual(self.license.alert_tier, expected_tier, msg=f"days={days}")
+
+    # -- auto-suspend across multiple licenses -----------------------------------
+
+    def test_auto_suspend_fires_when_any_one_of_several_licenses_expires(self):
+        UserLicense.objects.create(
+            user=self.therapist, license_number="PT-200", issuing_state="VA", expires_at=date.today() + timedelta(days=100)
+        )
+        self.license.expires_at = date.today() - timedelta(days=1)
+        self.license.save(update_fields=["expires_at"])
+        response = self.client.post(
+            reverse("api-login"),
+            data=json.dumps({"username": "ml-therapist", "password": "safe-test-password"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 401)
+        self.therapist.refresh_from_db()
+        self.assertEqual(self.therapist.status, User.Status.SUSPENDED)
+
+    # -- verify-before-reactivate ------------------------------------------------
+
+    def test_reactivate_is_blocked_until_a_verified_current_license_exists(self):
+        from care.user_management import suspend_user
+
+        suspend_user(self.therapist, self.admin, reason="test")
+        self.client.force_login(self.admin)
+        response = self.client.post(
+            reverse("api-org-user-status-action", kwargs={"user_id": self.therapist.pk}),
+            data=json.dumps({"action": "reactivate"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 409)
+        self.therapist.refresh_from_db()
+        self.assertEqual(self.therapist.status, User.Status.SUSPENDED)
+
+    def test_reactivate_succeeds_once_a_current_license_is_verified(self):
+        from care.user_management import suspend_user
+
+        suspend_user(self.therapist, self.admin, reason="test")
+        self.client.force_login(self.admin)
+        upload = SimpleUploadedFile("license.pdf", b"%PDF-1.4 fake license document", content_type="application/pdf")
+        self.client.post(self._document_url(), {"file": upload})
+        self.client.post(self._verify_url(), data=json.dumps({}), content_type="application/json")
+
+        response = self.client.post(
+            reverse("api-org-user-status-action", kwargs={"user_id": self.therapist.pk}),
+            data=json.dumps({"action": "reactivate"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.therapist.refresh_from_db()
+        self.assertEqual(self.therapist.status, User.Status.ACTIVE)
+
+    def test_reactivate_is_blocked_when_a_different_license_is_still_expired(self):
+        """Even with one verified, current license, reactivation must stay
+        blocked while another of this provider's licenses is still expired —
+        symmetric with suspend firing on ANY expired license, so reactivating
+        never immediately flaps back to suspended on the next list sweep."""
+        from care.user_management import suspend_user
+
+        UserLicense.objects.create(
+            user=self.therapist, license_number="PT-200", issuing_state="VA", expires_at=date.today() - timedelta(days=1)
+        )
+        suspend_user(self.therapist, self.admin, reason="test")
+        self.client.force_login(self.admin)
+        upload = SimpleUploadedFile("license.pdf", b"%PDF-1.4 fake license document", content_type="application/pdf")
+        self.client.post(self._document_url(license=self.license), {"file": upload})
+        self.client.post(self._verify_url(license=self.license), data=json.dumps({}), content_type="application/json")
+
+        response = self.client.post(
+            reverse("api-org-user-status-action", kwargs={"user_id": self.therapist.pk}),
+            data=json.dumps({"action": "reactivate"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 409)
+        self.therapist.refresh_from_db()
+        self.assertEqual(self.therapist.status, User.Status.SUSPENDED)
+
+
+class DocumentationApiTests(TestCase):
+    """React-facing clinical documentation API: create/view/edit/sign/addendum
+    for ClinicalNote, and the Documentation landing page's list endpoint."""
+
+    def setUp(self):
+        self.organization = Organization.objects.create(name="Doc Clinic", slug="doc-clinic")
+        self.admin = User.objects.create_user(
+            username="doc-admin", password="safe-test-password", organization=self.organization, role=User.Role.ADMIN
+        )
+        self.therapist = User.objects.create_user(
+            username="doc-therapist", password="safe-test-password", organization=self.organization, role=User.Role.THERAPIST
+        )
+        self.other_therapist = User.objects.create_user(
+            username="doc-other-therapist", password="safe-test-password", organization=self.organization, role=User.Role.THERAPIST
+        )
+        self.scheduler = User.objects.create_user(
+            username="doc-scheduler", password="safe-test-password", organization=self.organization, role=User.Role.SCHEDULER
+        )
+        self.patient = Patient.objects.create(
+            organization=self.organization, first_name="Dana", last_name="Doc",
+            date_of_birth="1990-01-01", assigned_therapist=self.therapist, diagnoses="Low back pain",
+        )
+
+    def _complete_note_payload(self, **overrides):
+        payload = {
+            "subjective": "Reports improved tolerance.",
+            "objective": "Walked 300 feet with no assistive device.",
+            "assessment": "Improved gait tolerance.",
+            "plan": "Continue plan of care and reassess next visit.",
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_therapist_can_create_a_note_for_their_patient(self):
+        self.client.force_login(self.therapist)
+        response = self.client.post(
+            reverse("api-note-create", kwargs={"patient_id": self.patient.pk}),
+            data=json.dumps({"noteType": ClinicalNote.Type.DAILY}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 201)
+        body = response.json()["note"]
+        self.assertEqual(body["status"], "draft")
+        self.assertEqual(ClinicalNote.objects.filter(patient=self.patient).count(), 1)
+
+    def test_scheduler_cannot_create_a_note(self):
+        self.client.force_login(self.scheduler)
+        response = self.client.post(
+            reverse("api-note-create", kwargs={"patient_id": self.patient.pk}),
+            data=json.dumps({"noteType": ClinicalNote.Type.DAILY}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_creating_a_note_for_an_appointment_that_already_has_one_returns_the_existing_note(self):
+        appointment = Appointment.objects.create(
+            patient=self.patient, therapist=self.therapist, kind=Appointment.Kind.FOLLOW_UP,
+            starts_at=timezone.now(), ends_at=timezone.now() + timedelta(minutes=30),
+            created_by=self.therapist,
+        )
+        existing = ClinicalNote.objects.create(
+            patient=self.patient, therapist=self.therapist, appointment=appointment, note_type=ClinicalNote.Type.DAILY,
+        )
+        self.client.force_login(self.therapist)
+        response = self.client.post(
+            reverse("api-note-create", kwargs={"patient_id": self.patient.pk}),
+            data=json.dumps({"noteType": ClinicalNote.Type.DAILY, "appointmentId": str(appointment.pk)}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["note"]["id"], str(existing.pk))
+        self.assertEqual(ClinicalNote.objects.filter(appointment=appointment).count(), 1)
+
+    def test_author_can_edit_their_own_draft_note(self):
+        note = ClinicalNote.objects.create(patient=self.patient, therapist=self.therapist, note_type=ClinicalNote.Type.DAILY)
+        self.client.force_login(self.therapist)
+        response = self.client.patch(
+            reverse("api-note-detail", kwargs={"note_id": note.pk}),
+            data=json.dumps({"subjective": "Updated subjective."}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        note.refresh_from_db()
+        self.assertEqual(note.subjective, "Updated subjective.")
+
+    def test_another_therapist_cannot_edit_someone_elses_draft_note(self):
+        note = ClinicalNote.objects.create(patient=self.patient, therapist=self.therapist, note_type=ClinicalNote.Type.DAILY)
+        self.client.force_login(self.other_therapist)
+        response = self.client.patch(
+            reverse("api-note-detail", kwargs={"note_id": note.pk}),
+            data=json.dumps({"subjective": "Should not be allowed."}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_admin_can_edit_any_draft_note_in_their_org(self):
+        note = ClinicalNote.objects.create(patient=self.patient, therapist=self.therapist, note_type=ClinicalNote.Type.DAILY)
+        self.client.force_login(self.admin)
+        response = self.client.patch(
+            reverse("api-note-detail", kwargs={"note_id": note.pk}),
+            data=json.dumps({"subjective": "Admin edit."}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_signed_note_cannot_be_edited_via_api(self):
+        note = ClinicalNote.objects.create(
+            patient=self.patient, therapist=self.therapist, note_type=ClinicalNote.Type.DAILY,
+            status=ClinicalNote.Status.SIGNED, signature_name="Doc Therapist",
+            signed_at=timezone.now(), finalization_attestation=True,
+        )
+        self.client.force_login(self.therapist)
+        response = self.client.patch(
+            reverse("api-note-detail", kwargs={"note_id": note.pk}),
+            data=json.dumps({"subjective": "Should be blocked."}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_sign_happy_path_records_signature_and_audit(self):
+        note = ClinicalNote.objects.create(
+            patient=self.patient, therapist=self.therapist, note_type=ClinicalNote.Type.DAILY,
+            **self._complete_note_payload(),
+        )
+        self.client.force_login(self.therapist)
+        response = self.client.post(
+            reverse("api-note-sign", kwargs={"note_id": note.pk}),
+            data=json.dumps({"attestation": True}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        note.refresh_from_db()
+        self.assertEqual(note.status, ClinicalNote.Status.SIGNED)
+        self.assertTrue(AuditEvent.objects.filter(action="note.signed", object_id=note.pk).exists())
+
+    def test_signing_a_note_completes_its_linked_appointment(self):
+        appointment = Appointment.objects.create(
+            patient=self.patient, therapist=self.therapist, kind=Appointment.Kind.FOLLOW_UP,
+            starts_at=timezone.now(), ends_at=timezone.now() + timedelta(minutes=30),
+            created_by=self.therapist, status=Appointment.Status.CHECKED_IN,
+        )
+        note = ClinicalNote.objects.create(
+            patient=self.patient, therapist=self.therapist, appointment=appointment, note_type=ClinicalNote.Type.DAILY,
+            **self._complete_note_payload(),
+        )
+        self.client.force_login(self.therapist)
+        response = self.client.post(
+            reverse("api-note-sign", kwargs={"note_id": note.pk}),
+            data=json.dumps({"attestation": True}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        appointment.refresh_from_db()
+        self.assertEqual(appointment.status, Appointment.Status.COMPLETED)
+
+    def test_signing_a_note_does_not_revive_a_cancelled_appointment(self):
+        appointment = Appointment.objects.create(
+            patient=self.patient, therapist=self.therapist, kind=Appointment.Kind.FOLLOW_UP,
+            starts_at=timezone.now(), ends_at=timezone.now() + timedelta(minutes=30),
+            created_by=self.therapist, status=Appointment.Status.CANCELLED,
+        )
+        note = ClinicalNote.objects.create(
+            patient=self.patient, therapist=self.therapist, appointment=appointment, note_type=ClinicalNote.Type.DAILY,
+            **self._complete_note_payload(),
+        )
+        self.client.force_login(self.therapist)
+        response = self.client.post(
+            reverse("api-note-sign", kwargs={"note_id": note.pk}),
+            data=json.dumps({"attestation": True}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        appointment.refresh_from_db()
+        self.assertEqual(appointment.status, Appointment.Status.CANCELLED)
+
+    def test_sign_blocked_by_compliance_findings(self):
+        note = ClinicalNote.objects.create(patient=self.patient, therapist=self.therapist, note_type=ClinicalNote.Type.DAILY)
+        self.client.force_login(self.therapist)
+        response = self.client.post(
+            reverse("api-note-sign", kwargs={"note_id": note.pk}),
+            data=json.dumps({"attestation": True}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 409)
+        note.refresh_from_db()
+        self.assertEqual(note.status, ClinicalNote.Status.DRAFT)
+
+    def test_sign_denied_for_wrong_role(self):
+        note = ClinicalNote.objects.create(
+            patient=self.patient, therapist=self.therapist, note_type=ClinicalNote.Type.DAILY,
+            **self._complete_note_payload(),
+        )
+        self.client.force_login(self.scheduler)
+        response = self.client.post(
+            reverse("api-note-sign", kwargs={"note_id": note.pk}),
+            data=json.dumps({"attestation": True}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_documentation_list_supports_quick_filters(self):
+        ClinicalNote.objects.create(patient=self.patient, therapist=self.therapist, note_type=ClinicalNote.Type.DAILY, status=ClinicalNote.Status.DRAFT)
+        ClinicalNote.objects.create(
+            patient=self.patient, therapist=self.other_therapist, note_type=ClinicalNote.Type.DAILY,
+            status=ClinicalNote.Status.SIGNED, signature_name="Other", signed_at=timezone.now(), finalization_attestation=True,
+        )
+        self.client.force_login(self.admin)
+        response = self.client.get(reverse("api-documentation-list"), {"quick": "drafts"})
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["total"], 1)
+        self.assertEqual(body["notes"][0]["status"], "draft")
+
+        response = self.client.get(reverse("api-documentation-list"), {"quick": "completed"})
+        self.assertEqual(response.json()["total"], 1)
+        self.assertEqual(response.json()["notes"][0]["status"], "signed")
+
+    def test_documentation_list_is_tenant_isolated(self):
+        other_org = Organization.objects.create(name="Other Doc Clinic", slug="other-doc-clinic")
+        other_admin = User.objects.create_user(
+            username="other-doc-admin", password="safe-test-password", organization=other_org, role=User.Role.ADMIN
+        )
+        other_therapist = User.objects.create_user(
+            username="other-doc-therapist", password="safe-test-password", organization=other_org, role=User.Role.THERAPIST
+        )
+        other_patient = Patient.objects.create(
+            organization=other_org, first_name="Other", last_name="Patient",
+            date_of_birth="1990-01-01", assigned_therapist=other_therapist,
+        )
+        ClinicalNote.objects.create(patient=other_patient, therapist=other_therapist, note_type=ClinicalNote.Type.DAILY)
+        ClinicalNote.objects.create(patient=self.patient, therapist=self.therapist, note_type=ClinicalNote.Type.DAILY)
+
+        self.client.force_login(self.admin)
+        response = self.client.get(reverse("api-documentation-list"))
+        self.assertEqual(response.json()["total"], 1)
+
+        self.client.logout()
+        self.client.force_login(other_admin)
+        response = self.client.get(reverse("api-documentation-list"))
+        self.assertEqual(response.json()["total"], 1)
+
+    def test_addendum_only_allowed_on_signed_notes(self):
+        draft_note = ClinicalNote.objects.create(patient=self.patient, therapist=self.therapist, note_type=ClinicalNote.Type.DAILY)
+        self.client.force_login(self.therapist)
+        response = self.client.post(
+            reverse("api-note-addendum-create", kwargs={"note_id": draft_note.pk}),
+            data=json.dumps({"reason": "Clarify", "body": "More detail."}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 403)
+
+        signed_note = ClinicalNote.objects.create(
+            patient=self.patient, therapist=self.therapist, note_type=ClinicalNote.Type.DAILY,
+            status=ClinicalNote.Status.SIGNED, signature_name="Doc Therapist",
+            signed_at=timezone.now(), finalization_attestation=True,
+        )
+        response = self.client.post(
+            reverse("api-note-addendum-create", kwargs={"note_id": signed_note.pk}),
+            data=json.dumps({"reason": "Clarify measurement", "body": "Measured in feet."}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(NoteAddendum.objects.filter(note=signed_note).count(), 1)
+        signed_note.refresh_from_db()
+        self.assertEqual(signed_note.status, ClinicalNote.Status.SIGNED)
+
+    def test_interventions_bulk_replace_sums_minutes_correctly(self):
+        note = ClinicalNote.objects.create(patient=self.patient, therapist=self.therapist, note_type=ClinicalNote.Type.DAILY)
+        self.client.force_login(self.therapist)
+        response = self.client.put(
+            reverse("api-note-interventions-replace", kwargs={"note_id": note.pk}),
+            data=json.dumps({"items": [
+                {"description": "Therapeutic exercise", "minutes": 25, "isTimed": True},
+                {"description": "Manual therapy", "minutes": 15, "isTimed": True},
+            ]}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        items = response.json()["interventionItems"]
+        self.assertEqual(len(items), 2)
+        self.assertEqual(sum(item["minutes"] for item in items), 40)
+
+    def test_interventions_cannot_be_changed_once_signed(self):
+        note = ClinicalNote.objects.create(
+            patient=self.patient, therapist=self.therapist, note_type=ClinicalNote.Type.DAILY,
+            status=ClinicalNote.Status.SIGNED, signature_name="Doc Therapist",
+            signed_at=timezone.now(), finalization_attestation=True,
+        )
+        self.client.force_login(self.therapist)
+        response = self.client.put(
+            reverse("api-note-interventions-replace", kwargs={"note_id": note.pk}),
+            data=json.dumps({"items": [{"description": "Should be blocked", "minutes": 10}]}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 403)
+
+
+class PtaCosignTests(TestCase):
+    """PTA-authored notes requiring a supervising PT/Director cosignature —
+    org-configurable via `Organization.pta_cosign_required`."""
+
+    def setUp(self):
+        self.organization = Organization.objects.create(name="Cosign Clinic", slug="cosign-clinic")
+        self.admin = User.objects.create_user(
+            username="cosign-admin", password="safe-test-password", organization=self.organization, role=User.Role.ADMIN
+        )
+        self.supervising_therapist = User.objects.create_user(
+            username="cosign-pt", password="safe-test-password", organization=self.organization, role=User.Role.THERAPIST
+        )
+        self.pta = User.objects.create_user(
+            username="cosign-pta", password="safe-test-password", organization=self.organization, role=User.Role.ASSISTANT
+        )
+        # `Patient.assigned_therapist` is a single FK — the existing chart-access
+        # model (`access.patients_for`) scopes a plain THERAPIST/ASSISTANT to only
+        # their own assigned patients, so under today's architecture the realistic
+        # cosigning actor for a PTA's assigned patient is ADMIN/DIRECTOR (org-wide
+        # clinical access), not an unrelated peer THERAPIST — this test assigns
+        # accordingly rather than working around access.py, which this feature
+        # must not change.
+        self.patient = Patient.objects.create(
+            organization=self.organization, first_name="Cody", last_name="Cosign",
+            date_of_birth="1990-01-01", assigned_therapist=self.pta,
+        )
+
+    def _complete_note_payload(self):
+        return {
+            "subjective": "Reports improved tolerance.",
+            "objective": "Walked 300 feet with no assistive device.",
+            "assessment": "Improved gait tolerance.",
+            "plan": "Continue plan of care and reassess next visit.",
+        }
+
+    def test_pta_authored_note_requires_cosign_by_default(self):
+        self.assertTrue(self.organization.pta_cosign_required)
+        self.client.force_login(self.pta)
+        response = self.client.post(
+            reverse("api-note-create", kwargs={"patient_id": self.patient.pk}),
+            data=json.dumps({"noteType": ClinicalNote.Type.DAILY}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(response.json()["note"]["cosignRequired"])
+
+    def test_pta_sign_lands_on_review_required_when_cosign_required(self):
+        note = ClinicalNote.objects.create(
+            patient=self.patient, therapist=self.pta, note_type=ClinicalNote.Type.DAILY,
+            cosign_required=True, **self._complete_note_payload(),
+        )
+        self.client.force_login(self.pta)
+        response = self.client.post(
+            reverse("api-note-sign", kwargs={"note_id": note.pk}),
+            data=json.dumps({"attestation": True}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        note.refresh_from_db()
+        self.assertEqual(note.status, ClinicalNote.Status.REVIEW_REQUIRED)
+        self.assertTrue(note.finalization_attestation)
+
+    def test_admin_can_cosign_and_note_becomes_signed(self):
+        # Under the existing access.patients_for scoping (unchanged by this
+        # feature), an admin/director has org-wide clinical access regardless
+        # of `Patient.assigned_therapist` — the realistic cosigning actor for
+        # a PTA's own assigned patient.
+        appointment = Appointment.objects.create(
+            patient=self.patient, therapist=self.pta, kind=Appointment.Kind.FOLLOW_UP,
+            starts_at=timezone.now(), ends_at=timezone.now() + timedelta(minutes=30),
+            created_by=self.pta, status=Appointment.Status.CHECKED_IN,
+        )
+        note = ClinicalNote.objects.create(
+            patient=self.patient, therapist=self.pta, appointment=appointment, note_type=ClinicalNote.Type.DAILY,
+            status=ClinicalNote.Status.REVIEW_REQUIRED, cosign_required=True,
+            signature_name="Cosign Pta", signed_at=timezone.now(), finalization_attestation=True,
+            **self._complete_note_payload(),
+        )
+        self.client.force_login(self.admin)
+        response = self.client.post(
+            reverse("api-note-cosign", kwargs={"note_id": note.pk}),
+            data=json.dumps({}), content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        note.refresh_from_db()
+        self.assertEqual(note.status, ClinicalNote.Status.SIGNED)
+        self.assertEqual(note.cosigned_by, self.admin)
+        self.assertIsNotNone(note.cosigned_at)
+        appointment.refresh_from_db()
+        self.assertEqual(appointment.status, Appointment.Status.COMPLETED)
+
+    def test_pta_sign_goes_straight_to_signed_when_org_opts_out(self):
+        self.organization.pta_cosign_required = False
+        self.organization.save(update_fields=["pta_cosign_required"])
+        note = ClinicalNote.objects.create(
+            patient=self.patient, therapist=self.pta, note_type=ClinicalNote.Type.DAILY,
+            cosign_required=False, **self._complete_note_payload(),
+        )
+        self.client.force_login(self.pta)
+        response = self.client.post(
+            reverse("api-note-sign", kwargs={"note_id": note.pk}),
+            data=json.dumps({"attestation": True}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        note.refresh_from_db()
+        self.assertEqual(note.status, ClinicalNote.Status.SIGNED)
+
+    def test_self_cosign_denied(self):
+        note = ClinicalNote.objects.create(
+            patient=self.patient, therapist=self.pta, note_type=ClinicalNote.Type.DAILY,
+            status=ClinicalNote.Status.REVIEW_REQUIRED, cosign_required=True,
+            signature_name="Cosign Pta", signed_at=timezone.now(), finalization_attestation=True,
+            **self._complete_note_payload(),
+        )
+        self.client.force_login(self.pta)
+        response = self.client.post(
+            reverse("api-note-cosign", kwargs={"note_id": note.pk}),
+            data=json.dumps({}), content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_wrong_role_cannot_cosign(self):
+        scheduler = User.objects.create_user(
+            username="cosign-scheduler", password="safe-test-password", organization=self.organization, role=User.Role.SCHEDULER
+        )
+        note = ClinicalNote.objects.create(
+            patient=self.patient, therapist=self.pta, note_type=ClinicalNote.Type.DAILY,
+            status=ClinicalNote.Status.REVIEW_REQUIRED, cosign_required=True,
+            signature_name="Cosign Pta", signed_at=timezone.now(), finalization_attestation=True,
+            **self._complete_note_payload(),
+        )
+        self.client.force_login(scheduler)
+        response = self.client.post(
+            reverse("api-note-cosign", kwargs={"note_id": note.pk}),
+            data=json.dumps({}), content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 403)

@@ -1,22 +1,46 @@
-import { FormEvent, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
+import { Plus, Search } from "lucide-react";
 
 import { ApiError, api } from "../api/client";
 import type { ManagedClient } from "../api/types";
 import { formatDate } from "../lib/format";
+import { ActionMenuTrigger } from "@/components/ui/action-menu-trigger";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import { StatusTabs } from "@/components/ui/status-tabs";
+import { AddClientDialog } from "./AddClientDialog";
 import { ArchiveClientDialog } from "./ArchiveClientDialog";
 import { ClientUsersDialog } from "./ClientUsersDialog";
 import { EditClientDialog } from "./EditClientDialog";
 import { ReactivateClientDialog } from "./ReactivateClientDialog";
 import { SuspendClientDialog } from "./SuspendClientDialog";
 
-const emptyForm = { clientName: "", clientEmail: "", addressLine1: "", city: "", state: "", zipCode: "", subscriptionTier: "professional", timezone: "America/New_York", adminFirstName: "", adminLastName: "", adminEmail: "", comments: "" };
-
 const TIMEZONES = ["America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles", "America/Phoenix", "Pacific/Honolulu"];
 const TIERS = [["starter", "Starter"], ["professional", "Professional"], ["premium", "Premium"], ["enterprise", "Enterprise"]] as const;
 const SORTS = [["client_number", "Client #"], ["client_name", "Client name"], ["created", "Created date"], ["users", "User count"]] as const;
+const STATUS_TABS = [
+  { value: "", label: "All Clients" },
+  { value: "active", label: "Active Clients" },
+  { value: "suspended", label: "Suspended Clients" },
+  { value: "archived", label: "Archived Clients" },
+];
 
 function openClient(clientNumber: number) {
   window.location.hash = `clients/${clientNumber}`;
+}
+
+function statusBadge(client: ManagedClient) {
+  if (client.archivedAt) return <Badge tone="danger">Archived</Badge>;
+  if (client.status === "suspended") return <Badge tone="warning">Suspended</Badge>;
+  return <Badge tone="success">Active</Badge>;
 }
 
 export function ClientManagementPage() {
@@ -30,7 +54,6 @@ export function ClientManagementPage() {
   const [timezone, setTimezone] = useState("");
   const [sort, setSort] = useState("client_number");
   const [pageSize, setPageSize] = useState("25");
-  const [form, setForm] = useState(emptyForm);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -40,7 +63,6 @@ export function ClientManagementPage() {
   const [suspendingClient, setSuspendingClient] = useState<ManagedClient | null>(null);
   const [reactivatingClient, setReactivatingClient] = useState<ManagedClient | null>(null);
   const [archivingClient, setArchivingClient] = useState<ManagedClient | null>(null);
-  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
   async function load() {
     try {
@@ -62,13 +84,6 @@ export function ClientManagementPage() {
   useEffect(() => { setPage(1); }, [query, status, tier, state, timezone, sort, pageSize]);
   useEffect(() => { void load(); }, [query, status, tier, state, timezone, sort, pageSize, page]);
 
-  async function create(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); setBusy(true); setError(""); setFieldErrors({});
-    try { const result = await api.createManagedClient(form); setInvite(result.invitationUrl); setForm(emptyForm); setOpen(false); await load(); }
-    catch (requestError) { if (requestError instanceof ApiError) { setError(requestError.message); setFieldErrors(requestError.fields); } else setError("Unable to create client."); }
-    finally { setBusy(false); }
-  }
-
   async function resendInvite(client: ManagedClient) {
     setBusy(true); setError("");
     try { const result = await api.resendAdminInvitation(client.clientNumber); setInvite(result.invitationUrl); }
@@ -78,35 +93,137 @@ export function ClientManagementPage() {
 
   const pageCount = Math.max(1, Math.ceil(total / Number(pageSize)));
 
-  return <div className="page-content"><header className="page-header split-header"><div><p className="eyebrow">Super Admin · Settings</p><h1>Client Management</h1><p>Provision and manage independent physical therapy organizations. Each client remains isolated from every other tenant.</p></div><button className="primary-button" onClick={() => setOpen(true)}>+ Add client</button></header>
-    {error && <p className="form-error" role="alert">{error}</p>}
-    {invite && <p className="form-notice" role="status">Development invitation link (local testing only): <a href={invite} target="_blank" rel="noreferrer">{invite}</a></p>}
-    <section className="surface-card client-management-card">
-      <div className="client-toolbar"><label className="field-inline"><span>Search clients</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Client #, name, email, city, or admin" /></label><span className="client-count">{total} client{total === 1 ? "" : "s"}</span></div>
-      <div className="client-filter-bar">
-        <label>Status<select value={status} onChange={(event) => setStatus(event.target.value)}><option value="">All</option><option value="active">Active</option><option value="suspended">Suspended</option><option value="archived">Archived</option></select></label>
-        <label>Subscription<select value={tier} onChange={(event) => setTier(event.target.value)}><option value="">All</option>{TIERS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-        <label>State<input value={state} onChange={(event) => setState(event.target.value)} placeholder="e.g. NC" style={{ width: "5rem" }} /></label>
-        <label>Timezone<select value={timezone} onChange={(event) => setTimezone(event.target.value)}><option value="">All</option>{TIMEZONES.map((zone) => <option key={zone} value={zone}>{zone}</option>)}</select></label>
-        <label>Sort by<select value={sort} onChange={(event) => setSort(event.target.value)}>{SORTS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-        <label>Per page<select value={pageSize} onChange={(event) => setPageSize(event.target.value)}><option value="10">10</option><option value="25">25</option><option value="50">50</option><option value="100">100</option></select></label>
+  return <div className="mx-auto max-w-[1400px] p-6 md:p-8">
+    <header className="mb-6 flex flex-wrap items-start justify-between gap-4">
+      <div>
+        <p className="m-0 mb-1 text-xs font-bold uppercase tracking-wider text-primary-deep">Super Admin · Settings</p>
+        <h1 className="m-0 text-2xl font-bold tracking-tight text-foreground md:text-3xl">Client Management</h1>
+        <p className="mt-1 max-w-2xl text-sm text-muted-foreground md:text-base">Provision and manage independent physical therapy organizations. Each client remains isolated from every other tenant.</p>
       </div>
-      <div className="table-wrap"><table><thead><tr><th>Client #</th><th>Client</th><th>Portal URL</th><th>Location</th><th>Status</th><th>Plan</th><th>Timezone</th><th>Users</th><th>Primary admin</th><th>Created</th><th>Actions</th></tr></thead><tbody>{clients.map((client) => <tr key={client.id}><td><strong>{client.clientNumber}</strong></td><td><button className="text-action" onClick={() => openClient(client.clientNumber)}><strong>{client.clientName}</strong></button><small>{client.email}</small></td><td>{client.portalUrl ? <a className="client-portal-link" href={client.portalUrl} target="_blank" rel="noreferrer">Open portal</a> : <small>Not configured</small>}</td><td>{client.city}, {client.state}</td><td><span className={`client-status ${client.status}`}>{client.archivedAt ? "Archived" : client.statusLabel}</span></td><td>{client.subscriptionTierLabel}</td><td><small>{client.timezone}</small></td><td>{client.userCount}</td><td>{client.primaryAdmin?.name || "Not assigned"}</td><td>{formatDate(client.createdAt, { month: "short", day: "numeric", year: "numeric" })}</td><td>
-        <button className="text-action" disabled={busy} onClick={() => openClient(client.clientNumber)}>View</button>{" "}
-        <button className="text-action" disabled={busy} onClick={() => setManagingUsersFor(client)}>Manage users</button>{" "}
-        <button className="text-action" disabled={busy} onClick={() => setEditingClient(client)}>Edit</button>{" "}
-        {!client.archivedAt && client.status === "active" && <button className="text-action" disabled={busy} onClick={() => setSuspendingClient(client)}>Suspend</button>}
-        {!client.archivedAt && client.status === "suspended" && <button className="text-action" disabled={busy} onClick={() => setReactivatingClient(client)}>Reactivate</button>}
-        {!client.archivedAt && <>{" "}<button className="text-action" disabled={busy} onClick={() => void resendInvite(client)}>Resend invite</button>{" "}<button className="text-action" disabled={busy} onClick={() => setArchivingClient(client)}>Archive</button></>}
-      </td></tr>)}</tbody></table></div>
-      {!clients.length && <p className="empty-copy">No clients match this search.</p>}
-      <div className="client-pagination">
-        <button className="secondary-button" disabled={page <= 1} onClick={() => setPage((current) => current - 1)}>Previous</button>
-        <span>Page {page} of {pageCount}</span>
-        <button className="secondary-button" disabled={page >= pageCount} onClick={() => setPage((current) => current + 1)}>Next</button>
+      <Button size="sm" className="h-11 gap-1.5" onClick={() => setOpen(true)}>
+        <Plus className="h-4 w-4" /> Add client
+      </Button>
+    </header>
+
+    {error && <p role="alert" className="mb-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">{error}</p>}
+    {invite && <p role="status" className="mb-4 rounded-md border border-primary-soft bg-primary-soft/40 px-4 py-3 text-sm font-medium text-primary-deep">An invitation email was sent to the new administrator. If it doesn't arrive, share this link directly: <a className="underline" href={invite} target="_blank" rel="noreferrer">{invite}</a></p>}
+
+    <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+      <StatusTabs tabs={STATUS_TABS} value={status} onChange={setStatus} />
+      <div className="relative">
+        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+        <Input
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Client #, name, email, city, or admin"
+          className="h-11 w-72 pl-9 text-sm"
+        />
       </div>
-    </section>
-    {open && <div className="modal-backdrop"><section className="move-dialog client-dialog" role="dialog" aria-modal="true" aria-labelledby="client-dialog-title"><button className="dialog-close" onClick={() => setOpen(false)} aria-label="Close">×</button><p className="eyebrow">Provision tenant</p><h2 id="client-dialog-title">Add client</h2>{error && <p className="form-error" role="alert">{error}</p>}<form className="stack-form" onSubmit={create}><h3>Facility information</h3><div className="field-grid"><label>Client name<input required aria-invalid={Boolean(fieldErrors.clientName)} value={form.clientName} onChange={(event) => setForm({ ...form, clientName: event.target.value })} />{fieldErrors.clientName && <small className="field-error">{fieldErrors.clientName}</small>}</label><label>Client email<input required type="email" aria-invalid={Boolean(fieldErrors.clientEmail)} value={form.clientEmail} onChange={(event) => setForm({ ...form, clientEmail: event.target.value })} />{fieldErrors.clientEmail && <small className="field-error">{fieldErrors.clientEmail}</small>}</label><label>Address<input required aria-invalid={Boolean(fieldErrors.addressLine1)} value={form.addressLine1} onChange={(event) => setForm({ ...form, addressLine1: event.target.value })} />{fieldErrors.addressLine1 && <small className="field-error">{fieldErrors.addressLine1}</small>}</label><label>City<input required aria-invalid={Boolean(fieldErrors.city)} value={form.city} onChange={(event) => setForm({ ...form, city: event.target.value })} />{fieldErrors.city && <small className="field-error">{fieldErrors.city}</small>}</label><label>State<input required aria-invalid={Boolean(fieldErrors.state)} value={form.state} onChange={(event) => setForm({ ...form, state: event.target.value })} />{fieldErrors.state && <small className="field-error">{fieldErrors.state}</small>}</label><label>ZIP<input required aria-invalid={Boolean(fieldErrors.zipCode)} value={form.zipCode} onChange={(event) => setForm({ ...form, zipCode: event.target.value })} />{fieldErrors.zipCode && <small className="field-error">{fieldErrors.zipCode}</small>}</label></div><h3>Account settings</h3><div className="field-grid"><label>Subscription<select value={form.subscriptionTier} onChange={(event) => setForm({ ...form, subscriptionTier: event.target.value })}><option value="starter">Starter</option><option value="professional">Professional</option><option value="premium">Premium</option><option value="enterprise">Enterprise</option></select></label><label>Timezone<select value={form.timezone} onChange={(event) => setForm({ ...form, timezone: event.target.value })}><option>America/New_York</option><option>America/Chicago</option><option>America/Denver</option><option>America/Los_Angeles</option><option>America/Phoenix</option><option>Pacific/Honolulu</option></select></label></div><h3>Primary administrator</h3><div className="field-grid"><label>First name<input required aria-invalid={Boolean(fieldErrors.adminFirstName)} value={form.adminFirstName} onChange={(event) => setForm({ ...form, adminFirstName: event.target.value })} />{fieldErrors.adminFirstName && <small className="field-error">{fieldErrors.adminFirstName}</small>}</label><label>Last name<input required aria-invalid={Boolean(fieldErrors.adminLastName)} value={form.adminLastName} onChange={(event) => setForm({ ...form, adminLastName: event.target.value })} />{fieldErrors.adminLastName && <small className="field-error">{fieldErrors.adminLastName}</small>}</label><label>Admin email<input required type="email" aria-invalid={Boolean(fieldErrors.adminEmail)} value={form.adminEmail} onChange={(event) => setForm({ ...form, adminEmail: event.target.value })} />{fieldErrors.adminEmail && <small className="field-error">{fieldErrors.adminEmail}</small>}</label></div><label>Comments<textarea rows={3} value={form.comments} onChange={(event) => setForm({ ...form, comments: event.target.value })} /></label><div className="button-row"><button className="secondary-button" type="button" onClick={() => setOpen(false)}>Cancel</button><button className="primary-button" disabled={busy} type="submit">{busy ? "Creating..." : "Create client"}</button></div></form></section></div>}
+    </div>
+
+    <div className="mb-4 flex flex-wrap items-center gap-2">
+      <select value={tier} onChange={(event) => setTier(event.target.value)} className="h-10 rounded-md border border-input bg-white px-3 text-sm text-foreground">
+        <option value="">All plans</option>
+        {TIERS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+      </select>
+      <input value={state} onChange={(event) => setState(event.target.value)} placeholder="State" className="h-10 w-24 rounded-md border border-input bg-white px-3 text-sm text-foreground" />
+      <select value={timezone} onChange={(event) => setTimezone(event.target.value)} className="h-10 rounded-md border border-input bg-white px-3 text-sm text-foreground">
+        <option value="">All timezones</option>
+        {TIMEZONES.map((zone) => <option key={zone} value={zone}>{zone}</option>)}
+      </select>
+      <select value={sort} onChange={(event) => setSort(event.target.value)} className="h-10 rounded-md border border-input bg-white px-3 text-sm text-foreground">
+        {SORTS.map(([value, label]) => <option key={value} value={value}>Sort: {label}</option>)}
+      </select>
+      <select value={pageSize} onChange={(event) => setPageSize(event.target.value)} className="h-10 rounded-md border border-input bg-white px-3 text-sm text-foreground">
+        <option value="10">10 / page</option>
+        <option value="25">25 / page</option>
+        <option value="50">50 / page</option>
+        <option value="100">100 / page</option>
+      </select>
+    </div>
+
+    <div className="overflow-hidden rounded-xl border border-border bg-white">
+      <div className="overflow-x-auto">
+        <table className="w-full border-collapse text-sm">
+          <thead>
+            <tr className="border-b border-border bg-muted/50 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              <th className="w-28 px-4 py-3">Actions</th>
+              <th className="px-4 py-3">Client</th>
+              <th className="px-4 py-3">Location</th>
+              <th className="px-4 py-3">Status</th>
+              <th className="px-4 py-3">Plan</th>
+              <th className="px-4 py-3">Users</th>
+              <th className="px-4 py-3">Primary admin</th>
+              <th className="px-4 py-3">Created</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-border">
+            {clients.map((client) => (
+              <tr key={client.id} className="hover:bg-muted/30">
+                <td className="px-4 py-3">
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <ActionMenuTrigger aria-label={`Actions for ${client.clientName}`} />
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent>
+                      <DropdownMenuItem onSelect={() => openClient(client.clientNumber)}>View</DropdownMenuItem>
+                      <DropdownMenuItem onSelect={() => setManagingUsersFor(client)}>Manage users</DropdownMenuItem>
+                      <DropdownMenuItem onSelect={() => setEditingClient(client)}>Edit</DropdownMenuItem>
+                      {!client.archivedAt && client.status === "active" && (
+                        <DropdownMenuItem onSelect={() => setSuspendingClient(client)}>Suspend</DropdownMenuItem>
+                      )}
+                      {!client.archivedAt && client.status === "suspended" && (
+                        <DropdownMenuItem onSelect={() => setReactivatingClient(client)}>Reactivate</DropdownMenuItem>
+                      )}
+                      {!client.archivedAt && (
+                        <>
+                          <DropdownMenuItem onSelect={() => void resendInvite(client)}>Resend invite</DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem destructive onSelect={() => setArchivingClient(client)}>Archive</DropdownMenuItem>
+                        </>
+                      )}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </td>
+                <td className="px-4 py-3">
+                  <button type="button" className="border-0 bg-transparent p-0 text-left font-semibold text-primary-deep hover:underline" onClick={() => openClient(client.clientNumber)}>
+                    #{client.clientNumber} {client.clientName}
+                  </button>
+                  <div className="text-xs text-muted-foreground">
+                    {client.email}
+                    {client.portalUrl && (
+                      <>
+                        {" · "}
+                        <a className="hover:underline" href={client.portalUrl} target="_blank" rel="noreferrer">Portal</a>
+                      </>
+                    )}
+                  </div>
+                </td>
+                <td className="px-4 py-3 text-foreground">{client.city}, {client.state}</td>
+                <td className="px-4 py-3">{statusBadge(client)}</td>
+                <td className="px-4 py-3 text-foreground">{client.subscriptionTierLabel}</td>
+                <td className="px-4 py-3 text-foreground">{client.userCount}</td>
+                <td className="px-4 py-3 text-foreground">{client.primaryAdmin?.name || "Not assigned"}</td>
+                <td className="px-4 py-3 text-muted-foreground">{formatDate(client.createdAt, { month: "short", day: "numeric", year: "numeric" })}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {!clients.length && <p className="px-4 py-10 text-center text-sm text-muted-foreground">No clients match this search.</p>}
+    </div>
+
+    <div className="mt-4 flex items-center justify-center gap-3 text-sm">
+      <Button variant="secondary" size="sm" className="h-9" disabled={page <= 1} onClick={() => setPage((current) => current - 1)}>Previous</Button>
+      <span className="text-muted-foreground">Page {page} of {pageCount} · {total} client{total === 1 ? "" : "s"}</span>
+      <Button variant="secondary" size="sm" className="h-9" disabled={page >= pageCount} onClick={() => setPage((current) => current + 1)}>Next</Button>
+    </div>
+    {open && (
+      <AddClientDialog
+        onClose={() => setOpen(false)}
+        onCreated={async (invitationUrl) => { setInvite(invitationUrl); setOpen(false); await load(); }}
+      />
+    )}
     {editingClient && <EditClientDialog client={editingClient} onClose={() => setEditingClient(null)} onSaved={async () => { setEditingClient(null); await load(); }} />}
     {managingUsersFor && <ClientUsersDialog client={managingUsersFor} onClose={() => setManagingUsersFor(null)} />}
     {suspendingClient && <SuspendClientDialog client={suspendingClient} onClose={() => setSuspendingClient(null)} onSuspended={async () => { setSuspendingClient(null); await load(); }} />}

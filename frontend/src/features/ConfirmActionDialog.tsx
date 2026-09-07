@@ -1,6 +1,8 @@
 import { useState } from "react";
 
 import { ApiError } from "../api/client";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogFooter } from "@/components/ui/dialog";
 
 interface ConfirmActionDialogProps {
   eyebrow: string;
@@ -33,18 +35,17 @@ export function ConfirmActionDialog({ eyebrow, title, body, confirmLabel, onClos
   }
 
   return (
-    <div className="modal-backdrop">
-      <section className="move-dialog client-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-action-title">
-        <button className="dialog-close" onClick={onClose} disabled={busy} aria-label="Close">&times;</button>
-        <p className="eyebrow">{eyebrow}</p>
-        <h2 id="confirm-action-title">{title}</h2>
-        <p>{body}</p>
-        {error && <p className="form-error" role="alert">{error}</p>}
-        <div className="button-row" style={{ marginTop: "1rem" }}>
-          <button className="secondary-button" type="button" onClick={onClose} disabled={busy}>Cancel</button>
-          <button className="primary-button" type="button" onClick={() => void confirm()} disabled={busy}>{busy ? "Working..." : confirmLabel}</button>
-        </div>
-      </section>
-    </div>
+    <Dialog titleId="confirm-action-title" eyebrow={eyebrow} title={title} onClose={onClose} busy={busy} maxWidth="max-w-md">
+      <p className="m-0 text-[1.0625rem] leading-relaxed text-foreground">{body}</p>
+      {error && (
+        <p role="alert" className="mt-3 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">
+          {error}
+        </p>
+      )}
+      <DialogFooter>
+        <Button type="button" variant="secondary" disabled={busy} onClick={onClose}>Cancel</Button>
+        <Button type="button" disabled={busy} onClick={() => void confirm()}>{busy ? "Working..." : confirmLabel}</Button>
+      </DialogFooter>
+    </Dialog>
   );
 }

@@ -9,14 +9,15 @@ import { Label } from "@/components/ui/label";
 
 interface LoginScreenProps {
   onAuthenticated: (user: WorkspaceUser) => void;
+  noticeMessage?: string;
 }
 
-export function LoginScreen({ onAuthenticated }: LoginScreenProps) {
+export function LoginScreen({ onAuthenticated, noticeMessage }: LoginScreenProps) {
   const portalSlug = window.location.pathname.split("/").filter(Boolean)[0] || "";
   const [facilityName, setFacilityName] = useState("Facility name");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
+  const [error, setError] = useState(noticeMessage || "");
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {

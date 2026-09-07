@@ -4,10 +4,13 @@ import type {
   AuditEvent,
   ClinicLocation,
   DashboardData,
+  DocumentationListFilters,
   Goal,
   GoalSuggestion,
   HomeProgram,
   HomeProgramSuggestion,
+  NoteDetail,
+  NoteSummary,
   OperationalReport,
   Patient,
   PatientDetail,
@@ -28,8 +31,12 @@ import type {
   ScheduleData,
   StaffOption,
   TimelineEvent,
+  UserLicenseInfo,
+  UserSessionInfo,
   WorkspaceUser,
 } from "./types";
+
+import { notifySessionEnded } from "../lib/sessionEvents";
 
 const API_ROOT = import.meta.env.VITE_API_ROOT || "/api/v1";
 
@@ -38,6 +45,7 @@ export class ApiError extends Error {
     message: string,
     readonly status: number,
     readonly fields: Record<string, string> = {},
+    readonly code?: string,
   ) {
     super(message);
     this.name = "ApiError";
@@ -51,7 +59,13 @@ async function readJson<T>(response: Response): Promise<T> {
   if (!response.ok) {
     const detail =
       typeof payload.detail === "string" ? payload.detail : "The request could not be completed.";
-    throw new ApiError(detail, response.status, payload.errors || {});
+    // A 401 carrying `code` means an already-established session just ended
+    // (new login elsewhere, timeout, password change, admin action) — as
+    // opposed to a plain "not logged in yet" 401, which has no code.
+    if (response.status === 401 && typeof payload.code === "string") {
+      notifySessionEnded(detail);
+    }
+    throw new ApiError(detail, response.status, payload.errors || {}, payload.code);
   }
   return payload as T;
 }
@@ -71,7 +85,7 @@ async function ensureCsrfToken(): Promise<string> {
 
 async function request<T>(
   path: string,
-  options: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: Record<string, unknown> } = {},
+  options: { method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE"; body?: Record<string, unknown> } = {},
 ): Promise<T> {
   const method = options.method || "GET";
   const isWrite = method !== "GET";
@@ -116,15 +130,21 @@ export const api = {
     await request("/auth/logout/", { method: "POST" });
     csrfToken = null;
   },
-  async changePassword(currentPassword: string, newPassword: string) {
-    return request<{ detail: string }>("/auth/change-password/", {
-      method: "POST",
-      body: { currentPassword, newPassword },
-    });
+  async changePassword(body: { currentPassword?: string; newPassword: string; confirmPassword?: string }) {
+    return request<{ detail: string }>("/auth/change-password/", { method: "POST", body });
   },
   async me() {
     const payload = await request<{ user: WorkspaceUser }>("/auth/me/");
     return payload.user;
+  },
+  async mySessions() {
+    return request<{ sessions: UserSessionInfo[] }>("/auth/sessions/");
+  },
+  async revokeMySession(sessionId: string) {
+    return request<{ detail: string }>(`/auth/sessions/${sessionId}/revoke/`, { method: "POST" });
+  },
+  async revokeMyOtherSessions() {
+    return request<{ detail: string; revokedCount: number }>("/auth/sessions/revoke-others/", { method: "POST" });
   },
   async dashboard() {
     return request<DashboardData>("/dashboard/");
@@ -140,11 +160,46 @@ export const api = {
   async updateOrganizationUser(userId: string, body: Record<string, unknown>) {
     return request<{ user: ManagedClientUser }>(`/users/${userId}/`, { method: "PATCH", body });
   },
-  async setOrganizationUserActive(userId: string, active: boolean) {
-    return request<{ user: ManagedClientUser }>(`/users/${userId}/`, { method: "PATCH", body: { active } });
+  async organizationUserStatusAction(userId: string, action: string, reason = "") {
+    return request<{ user: ManagedClientUser }>(`/users/${userId}/status-action/`, {
+      method: "POST",
+      body: { action, reason },
+    });
   },
-  async archiveOrganizationUser(userId: string) {
-    return request<{ user: ManagedClientUser }>(`/users/${userId}/`, { method: "DELETE" });
+  async organizationUserRevokeSessions(userId: string) {
+    return request<{ user: ManagedClientUser; revokedCount: number }>(`/users/${userId}/revoke-sessions/`, {
+      method: "POST",
+    });
+  },
+  async createOrganizationUserLicense(userId: string, body: Record<string, unknown>) {
+    return request<{ license: UserLicenseInfo }>(`/users/${userId}/licenses/`, { method: "POST", body });
+  },
+  async updateOrganizationUserLicense(userId: string, licenseId: string, body: Record<string, unknown>) {
+    return request<{ license: UserLicenseInfo }>(`/users/${userId}/licenses/${licenseId}/`, { method: "PATCH", body });
+  },
+  async deleteOrganizationUserLicense(userId: string, licenseId: string) {
+    return request<Record<string, never>>(`/users/${userId}/licenses/${licenseId}/`, { method: "DELETE" });
+  },
+  async uploadOrganizationUserLicenseDocument(userId: string, licenseId: string, file: File) {
+    const token = await ensureCsrfToken();
+    const formData = new FormData();
+    formData.append("file", file);
+    const response = await fetch(`${API_ROOT}/users/${userId}/licenses/${licenseId}/document/`, {
+      method: "POST",
+      credentials: "include",
+      headers: { Accept: "application/json", "X-CSRFToken": token },
+      body: formData,
+    });
+    return readJson<{ license: UserLicenseInfo }>(response);
+  },
+  organizationUserLicenseDocumentUrl(userId: string, licenseId: string) {
+    return `${API_ROOT}/users/${userId}/licenses/${licenseId}/document/`;
+  },
+  async verifyOrganizationUserLicense(userId: string, licenseId: string, notes = "") {
+    return request<{ license: UserLicenseInfo }>(`/users/${userId}/licenses/${licenseId}/verify/`, {
+      method: "POST",
+      body: { notes },
+    });
   },
   async patients(query = "") {
     const search = query ? `?q=${encodeURIComponent(query)}` : "";
@@ -250,6 +305,35 @@ export const api = {
   },
   async recordOutcome(patientId: string, body: Record<string, unknown>) {
     return request(`/patients/${patientId}/outcomes/`, { method: "POST", body });
+  },
+  async listDocumentation(filters: DocumentationListFilters = {}) {
+    const params = new URLSearchParams(filters as Record<string, string>);
+    const search = params.toString() ? `?${params.toString()}` : "";
+    return request<{ notes: NoteSummary[]; total: number; page: number; pageSize: number }>(`/documentation/${search}`);
+  },
+  async createNote(patientId: string, body: Record<string, unknown>) {
+    return request<{ note: NoteDetail }>(`/patients/${patientId}/notes/`, { method: "POST", body });
+  },
+  async getNote(noteId: string) {
+    return request<{ note: NoteDetail }>(`/notes/${noteId}/`);
+  },
+  async updateNote(noteId: string, body: Record<string, unknown>) {
+    return request<{ note: NoteDetail }>(`/notes/${noteId}/`, { method: "PATCH", body });
+  },
+  async signNote(noteId: string, attestation: boolean) {
+    return request<{ note: NoteDetail }>(`/notes/${noteId}/sign/`, { method: "POST", body: { attestation } });
+  },
+  async cosignNote(noteId: string) {
+    return request<{ note: NoteDetail }>(`/notes/${noteId}/cosign/`, { method: "POST" });
+  },
+  async createAddendum(noteId: string, reason: string, body: string) {
+    return request<{ note: NoteDetail }>(`/notes/${noteId}/addenda/`, { method: "POST", body: { reason, body } });
+  },
+  async replaceInterventions(noteId: string, items: Record<string, unknown>[]) {
+    return request<{ interventionItems: NoteDetail["interventionItems"] }>(`/notes/${noteId}/interventions/`, {
+      method: "PUT",
+      body: { items },
+    });
   },
   async saveVoiceCapture(patientId: string, body: Record<string, unknown>) {
     return request(`/patients/${patientId}/voice-captures/`, { method: "POST", body });
@@ -366,11 +450,46 @@ export const api = {
   async updateUser(userId: string, body: Record<string, unknown>) {
     return request<{ user: ManagedClientUser }>(`/super-admin/users/${userId}/`, { method: "PATCH", body });
   },
-  async setUserActive(userId: string, active: boolean) {
-    return request<{ user: ManagedClientUser }>(`/super-admin/users/${userId}/`, { method: "PATCH", body: { active } });
+  async userStatusAction(userId: string, action: string, reason = "") {
+    return request<{ user: ManagedClientUser }>(`/super-admin/users/${userId}/status-action/`, {
+      method: "POST",
+      body: { action, reason },
+    });
   },
-  async archiveUser(userId: string) {
-    return request<{ user: ManagedClientUser }>(`/super-admin/users/${userId}/`, { method: "DELETE" });
+  async userRevokeSessions(userId: string) {
+    return request<{ user: ManagedClientUser; revokedCount: number }>(`/super-admin/users/${userId}/revoke-sessions/`, {
+      method: "POST",
+    });
+  },
+  async createUserLicense(userId: string, body: Record<string, unknown>) {
+    return request<{ license: UserLicenseInfo }>(`/super-admin/users/${userId}/licenses/`, { method: "POST", body });
+  },
+  async updateUserLicense(userId: string, licenseId: string, body: Record<string, unknown>) {
+    return request<{ license: UserLicenseInfo }>(`/super-admin/users/${userId}/licenses/${licenseId}/`, { method: "PATCH", body });
+  },
+  async deleteUserLicense(userId: string, licenseId: string) {
+    return request<Record<string, never>>(`/super-admin/users/${userId}/licenses/${licenseId}/`, { method: "DELETE" });
+  },
+  async uploadUserLicenseDocument(userId: string, licenseId: string, file: File) {
+    const token = await ensureCsrfToken();
+    const formData = new FormData();
+    formData.append("file", file);
+    const response = await fetch(`${API_ROOT}/super-admin/users/${userId}/licenses/${licenseId}/document/`, {
+      method: "POST",
+      credentials: "include",
+      headers: { Accept: "application/json", "X-CSRFToken": token },
+      body: formData,
+    });
+    return readJson<{ license: UserLicenseInfo }>(response);
+  },
+  userLicenseDocumentUrl(userId: string, licenseId: string) {
+    return `${API_ROOT}/super-admin/users/${userId}/licenses/${licenseId}/document/`;
+  },
+  async verifyUserLicense(userId: string, licenseId: string, notes = "") {
+    return request<{ license: UserLicenseInfo }>(`/super-admin/users/${userId}/licenses/${licenseId}/verify/`, {
+      method: "POST",
+      body: { notes },
+    });
   },
   async schedule(month: string) {
     return request<ScheduleData>(`/schedule/?month=${encodeURIComponent(month)}`);

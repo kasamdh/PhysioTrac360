@@ -34,6 +34,11 @@ CSRF_TRUSTED_ORIGINS = [
     if origin.strip()
 ]
 
+# Base URL of the React frontend, used to build links sent outside the app
+# (client-admin invitations, etc.). Must be updated to the real domain before
+# deployment — left at the Vite dev server address until then.
+FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "http://localhost:5173").rstrip("/")
+
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
@@ -157,6 +162,50 @@ SECURE_REFERRER_POLICY = "same-origin"
 X_FRAME_OPTIONS = "DENY"
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
+# Login/session security policy. All values are configurable via environment
+# variables rather than hard-coded, per the app's account-security design —
+# defaults match the app's documented policy.
+FAILED_LOGIN_LOCKOUT_THRESHOLD = int(os.getenv("FAILED_LOGIN_LOCKOUT_THRESHOLD", "5"))
+LOCKOUT_DURATION_MINUTES = int(os.getenv("LOCKOUT_DURATION_MINUTES", "15"))
+IDLE_WARNING_MINUTES = int(os.getenv("IDLE_WARNING_MINUTES", "13"))
+IDLE_TIMEOUT_MINUTES = int(os.getenv("IDLE_TIMEOUT_MINUTES", "15"))
+ABSOLUTE_SESSION_HOURS = int(os.getenv("ABSOLUTE_SESSION_HOURS", "12"))
+
+# PT/PTA license expiration: escalating day-count thresholds the onboarding
+# alert warns an admin at (90/60/30 = informational-to-high-priority, 14/7 =
+# critical). Expiration itself (days remaining < 0), not any of these
+# windows, is what auto-suspends the account.
+LICENSE_WARNING_DAYS = [
+    int(days) for days in os.getenv("LICENSE_WARNING_DAYS", "90,60,30,14,7").split(",") if days.strip()
+]
+
+# Maximum concurrent active sessions per role. A role not listed here (e.g. a
+# future role) is unlimited by omission rather than silently blocked.
+SESSION_LIMITS_BY_ROLE = {
+    "super_admin": int(os.getenv("SESSION_LIMIT_SUPER_ADMIN", "1")),
+    "admin": int(os.getenv("SESSION_LIMIT_ADMIN", "1")),
+    "biller": int(os.getenv("SESSION_LIMIT_BILLER", "1")),
+    "scheduler": int(os.getenv("SESSION_LIMIT_FRONT_DESK", "1")),
+    "therapist": int(os.getenv("SESSION_LIMIT_THERAPIST", "2")),
+    "assistant": int(os.getenv("SESSION_LIMIT_ASSISTANT", "2")),
+    "patient": int(os.getenv("SESSION_LIMIT_PATIENT", "3")),
+}
+DEFAULT_SESSION_LIMIT = int(os.getenv("SESSION_LIMIT_DEFAULT", "2"))
+
 # A real AI connector is deliberately off until a HIPAA-eligible provider,
 # business associate agreement, and data-use assessment are in place.
 AI_DRAFTING_ENABLED = os.getenv("AI_DRAFTING_ENABLED", "False").lower() == "true"
+
+# Outbound transactional email (client-admin invitations, etc.). Defaults to
+# Django's console backend so email "sends" print to the server log with no
+# external account required in development. Point EMAIL_BACKEND/EMAIL_HOST/...
+# at a real HIPAA-eligible provider (SES, Postmark, SMTP relay with a BAA)
+# before production use — these messages never carry PHI, only account setup
+# links, but still need to go through a provider covered by the org's BAA.
+EMAIL_BACKEND = os.getenv("EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend")
+EMAIL_HOST = os.getenv("EMAIL_HOST", "")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "True").lower() == "true"
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "no-reply@physiotrac360.local")

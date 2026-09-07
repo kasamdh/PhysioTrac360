@@ -6,11 +6,13 @@ from datetime import timedelta
 from hashlib import sha256
 from secrets import token_urlsafe
 
+from django.conf import settings
 from django.db import transaction
 from django.utils.text import slugify
 from django.utils import timezone
 
 from .models import ClientInvitation, ClientNumberSequence, Organization, User
+from .notifications import send_client_admin_invitation_email
 from .services import record_audit_event
 
 
@@ -21,8 +23,13 @@ class ProvisionedClient:
     development_invite_token: str
 
 
+def invitation_activation_url(organization: Organization, token: str) -> str:
+    return f"{settings.FRONTEND_BASE_URL}/{organization.slug}/activate?token={token}"
+
+
 def issue_invitation(organization: Organization, administrator: User) -> str:
-    """Issue one fresh development invitation and invalidate older ones."""
+    """Issue one fresh invitation (invalidating older unused ones) and email
+    the activation link to the administrator."""
     token = token_urlsafe(32)
     ClientInvitation.objects.filter(user=administrator, used_at__isnull=True).update(
         used_at=timezone.now()
@@ -33,6 +40,7 @@ def issue_invitation(organization: Organization, administrator: User) -> str:
         token_hash=sha256(token.encode()).hexdigest(),
         expires_at=timezone.now() + timedelta(days=7),
     )
+    send_client_admin_invitation_email(administrator, organization, invitation_activation_url(organization, token))
     return token
 
 
@@ -64,7 +72,7 @@ def provision_client(payload: dict, actor: User) -> ProvisionedClient:
         client_number=next_client_number(),
         name=name,
         slug=slug,
-        portal_url=f"http://localhost:5173/{slug}",
+        portal_url=f"{settings.FRONTEND_BASE_URL}/{slug}",
         support_email=str(payload["clientEmail"]).strip().lower(),
         support_phone=str(payload.get("clientPhone", "")).strip(),
         address_line_1=str(payload["addressLine1"]).strip(),

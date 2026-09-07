@@ -10,6 +10,9 @@ import { ClientDetailPage } from "./features/ClientDetailPage";
 import { ClinicSettingsPage } from "./features/ClinicSettingsPage";
 import { DashboardPage } from "./features/DashboardPage";
 import { ClientManagementPage } from "./features/ClientManagementPage";
+import { DocumentationPage } from "./features/documentation/DocumentationPage";
+import { DocumentationWorkspace } from "./features/documentation/DocumentationWorkspace";
+import { ForcedPasswordChangeDialog } from "./features/ForcedPasswordChangeDialog";
 import { LoginScreen } from "./features/LoginScreen";
 import { OrganizationUsersPage } from "./features/OrganizationUsersPage";
 import { PatientsPage } from "./features/PatientsPage";
@@ -19,8 +22,9 @@ import { SchedulePage } from "./features/SchedulePage";
 import { SafetyPage } from "./features/SafetyPage";
 import { SuperAdminAdministrationPage } from "./features/SuperAdminAdministrationPage";
 import { SuperAdminHomePage } from "./features/SuperAdminHomePage";
+import { onSessionEnded } from "./lib/sessionEvents";
 
-const TENANT_PAGES: WorkspacePage[] = ["schedule", "patients", "safety", "users", "clinic-settings", "reports"];
+const TENANT_PAGES: WorkspacePage[] = ["schedule", "patients", "documentation", "safety", "users", "clinic-settings", "reports"];
 
 function pageFromHash(): WorkspacePage {
   const value = window.location.hash.replace("#", "").split("/")[0];
@@ -48,18 +52,36 @@ function clientNumberFromHash(): number | null {
   return Number.isInteger(parsed) ? parsed : null;
 }
 
+function documentationParamsFromHash(): { patientId: string; noteId: string } | null {
+  const segments = window.location.hash.replace("#", "").split("/");
+  if (segments[0] !== "documentation" || !segments[1] || !segments[2]) return null;
+  return { patientId: segments[1], noteId: segments[2] };
+}
+
 export default function App() {
   const [user, setUser] = useState<WorkspaceUser | null>(null);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState<WorkspacePage>(pageFromHash);
   const [selectedClientNumber, setSelectedClientNumber] = useState<number | null>(clientNumberFromHash);
+  const [documentationParams, setDocumentationParams] = useState<{ patientId: string; noteId: string } | null>(documentationParamsFromHash);
   const [invitationToken, setInvitationToken] = useState<string | null>(invitationTokenFromLocation);
   const [error, setError] = useState("");
+  const [sessionNotice, setSessionNotice] = useState("");
+
+  useEffect(() => {
+    return onSessionEnded((message) => {
+      // The session is already dead server-side (or in another tab) —
+      // just drop everything sensitive from memory and show why.
+      setUser(null);
+      setSessionNotice(message);
+    });
+  }, []);
 
   useEffect(() => {
     const syncPageFromHash = () => {
       setPage(pageFromHash());
       setSelectedClientNumber(clientNumberFromHash());
+      setDocumentationParams(documentationParamsFromHash());
     };
     window.addEventListener("hashchange", syncPageFromHash);
     syncPageFromHash();
@@ -84,6 +106,12 @@ export default function App() {
   function navigate(nextPage: WorkspacePage) {
     setPage(nextPage);
     window.location.hash = nextPage === "dashboard" ? "" : nextPage;
+  }
+
+  function openDocumentationNote(patientId: string, noteId: string) {
+    setPage("documentation");
+    setDocumentationParams({ patientId, noteId });
+    window.location.hash = `documentation/${patientId}/${noteId}`;
   }
 
   async function logout() {
@@ -115,22 +143,32 @@ export default function App() {
     return <main className="app-loading">Connecting to the protected workspace…</main>;
   }
   if (!user) {
-    return <><LoginScreen onAuthenticated={setUser} />{error && <p className="app-connection-error" role="alert">{error}</p>}</>;
+    return (
+      <>
+        <LoginScreen onAuthenticated={(nextUser) => { setSessionNotice(""); setUser(nextUser); }} noticeMessage={sessionNotice} />
+        {error && <p className="app-connection-error" role="alert">{error}</p>}
+      </>
+    );
+  }
+  if (user.mustChangePassword) {
+    return <ForcedPasswordChangeDialog user={user} onChanged={setUser} onLogout={() => void logout()} />;
   }
 
   const visiblePage = user.capabilities.isSuperAdmin
     ? (["users", "clients", "dashboard", "admin-hub"].includes(page) ? page : "dashboard")
     : page === "schedule" && !user.capabilities.canManageSchedule
       ? "dashboard"
-      : page === "safety" && !user.capabilities.canReviewAudit
+      : page === "documentation" && !user.capabilities.canAccessClinical
         ? "dashboard"
-        : page === "users" && !user.capabilities.canManageAccess
+        : page === "safety" && !user.capabilities.canReviewAudit
           ? "dashboard"
-          : (page === "clinic-settings" || page === "reports") && user.role !== "admin"
+          : page === "users" && !user.capabilities.canManageAccess
             ? "dashboard"
-            : page === "clients"
+            : (page === "clinic-settings" || page === "reports") && user.role !== "admin"
               ? "dashboard"
-              : page;
+              : page === "clients"
+                ? "dashboard"
+                : page;
 
   // The Home landing page (Super Admin and org-admin) is a standalone,
   // sidebar-free page — like the login screen — not a page inside AppShell.
@@ -148,6 +186,19 @@ export default function App() {
   return <AppShell user={user} page={visiblePage} onNavigate={navigate} onLogout={() => void logout()}>
     {visiblePage === "dashboard" && <DashboardPage />}
     {visiblePage === "patients" && <PatientsPage user={user} />}
+    {visiblePage === "documentation" && (
+      documentationParams
+        ? (
+          <DocumentationWorkspace
+            key={documentationParams.noteId}
+            patientId={documentationParams.patientId}
+            noteId={documentationParams.noteId}
+            user={user}
+            onBack={() => navigate("documentation")}
+          />
+        )
+        : <DocumentationPage user={user} onOpenNote={openDocumentationNote} />
+    )}
     {visiblePage === "schedule" && <SchedulePage user={user} />}
     {visiblePage === "safety" && <SafetyPage />}
     {visiblePage === "users" && (user.capabilities.isSuperAdmin ? <AllUsersPage /> : <OrganizationUsersPage currentUserId={user.id} />)}

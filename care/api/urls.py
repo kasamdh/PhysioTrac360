@@ -1,7 +1,7 @@
 from django.urls import path
 
 from .. import views as legacy_views
-from . import admin_config, documents, public_booking, views, workflow_views, super_admin
+from . import admin_config, documents, note_views, public_booking, user_licenses, views, workflow_views, super_admin
 
 
 urlpatterns = [
@@ -17,9 +17,30 @@ urlpatterns = [
     path("auth/logout/", views.logout, name="api-logout"),
     path("auth/change-password/", views.change_password, name="api-change-password"),
     path("auth/me/", views.me, name="api-me"),
+    path("auth/sessions/", views.my_sessions, name="api-my-sessions"),
+    path("auth/sessions/<uuid:session_id>/revoke/", views.revoke_my_session, name="api-revoke-my-session"),
+    path("auth/sessions/revoke-others/", views.revoke_my_other_sessions, name="api-revoke-my-other-sessions"),
     path("dashboard/", views.dashboard, name="api-dashboard"),
     path("users/", views.organization_users, name="api-org-users"),
     path("users/<uuid:user_id>/", views.organization_user_detail, name="api-org-user-detail"),
+    path("users/<uuid:user_id>/status-action/", views.organization_user_status_action, name="api-org-user-status-action"),
+    path("users/<uuid:user_id>/revoke-sessions/", views.organization_user_revoke_sessions, name="api-org-user-revoke-sessions"),
+    path("users/<uuid:user_id>/licenses/", user_licenses.organization_user_licenses, name="api-org-user-licenses"),
+    path(
+        "users/<uuid:user_id>/licenses/<uuid:license_id>/",
+        user_licenses.organization_user_license_detail,
+        name="api-org-user-license-detail",
+    ),
+    path(
+        "users/<uuid:user_id>/licenses/<uuid:license_id>/document/",
+        user_licenses.organization_user_license_document,
+        name="api-org-user-license-document",
+    ),
+    path(
+        "users/<uuid:user_id>/licenses/<uuid:license_id>/verify/",
+        user_licenses.organization_user_license_verify,
+        name="api-org-user-license-verify",
+    ),
     path("patients/", views.patients, name="api-patients"),
     path("staff/", views.staff_options, name="api-staff-options"),
     path("locations/", admin_config.locations, name="api-locations"),
@@ -44,6 +65,17 @@ urlpatterns = [
         "patients/<uuid:patient_id>/timeline/",
         workflow_views.patient_timeline,
         name="api-patient-timeline",
+    ),
+    path("documentation/", note_views.documentation_list, name="api-documentation-list"),
+    path("patients/<uuid:patient_id>/notes/", note_views.note_create, name="api-note-create"),
+    path("notes/<uuid:note_id>/", note_views.note_detail, name="api-note-detail"),
+    path("notes/<uuid:note_id>/sign/", note_views.note_sign, name="api-note-sign"),
+    path("notes/<uuid:note_id>/cosign/", note_views.note_cosign, name="api-note-cosign"),
+    path("notes/<uuid:note_id>/addenda/", note_views.addendum_create, name="api-note-addendum-create"),
+    path(
+        "notes/<uuid:note_id>/interventions/",
+        note_views.interventions_replace,
+        name="api-note-interventions-replace",
     ),
     path(
         "patients/<uuid:patient_id>/drafts/",
@@ -138,6 +170,24 @@ urlpatterns = [
     path("super-admin/clients/", super_admin.clients, name="api-super-admin-clients"),
     path("super-admin/users/", super_admin.all_users, name="api-super-admin-users"),
     path("super-admin/users/<uuid:user_id>/", super_admin.user_detail, name="api-super-admin-user-detail"),
+    path("super-admin/users/<uuid:user_id>/status-action/", super_admin.user_status_action, name="api-super-admin-user-status-action"),
+    path("super-admin/users/<uuid:user_id>/revoke-sessions/", super_admin.user_revoke_sessions, name="api-super-admin-user-revoke-sessions"),
+    path("super-admin/users/<uuid:user_id>/licenses/", user_licenses.super_admin_user_licenses, name="api-super-admin-user-licenses"),
+    path(
+        "super-admin/users/<uuid:user_id>/licenses/<uuid:license_id>/",
+        user_licenses.super_admin_user_license_detail,
+        name="api-super-admin-user-license-detail",
+    ),
+    path(
+        "super-admin/users/<uuid:user_id>/licenses/<uuid:license_id>/document/",
+        user_licenses.super_admin_user_license_document,
+        name="api-super-admin-user-license-document",
+    ),
+    path(
+        "super-admin/users/<uuid:user_id>/licenses/<uuid:license_id>/verify/",
+        user_licenses.super_admin_user_license_verify,
+        name="api-super-admin-user-license-verify",
+    ),
     path("super-admin/clients/create/", super_admin.client_create, name="api-super-admin-client-create"),
     path("super-admin/clients/<int:client_number>/", super_admin.client_detail, name="api-super-admin-client-detail"),
     path("super-admin/clients/<int:client_number>/users/", super_admin.client_users, name="api-super-admin-client-users"),

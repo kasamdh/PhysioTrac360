@@ -149,7 +149,7 @@ def note_compliance_findings(
                 True,
             )
         )
-    if note.note_type in {ClinicalNote.Type.EVALUATION, ClinicalNote.Type.PROGRESS}:
+    if note.note_type in {ClinicalNote.Type.EVALUATION, ClinicalNote.Type.PROGRESS, ClinicalNote.Type.RE_EVALUATION}:
         poc_fields = (
             note.plan_of_care_start,
             note.plan_of_care_end,
@@ -176,7 +176,16 @@ def note_compliance_findings(
                 True,
             )
         )
-    if not note.is_signed:
+    if note.status == ClinicalNote.Status.REVIEW_REQUIRED and note.cosign_required:
+        findings.append(
+            ComplianceFinding(
+                "cosign_pending",
+                "medium",
+                "Supervising cosignature pending",
+                "A PT or clinical director must cosign this note before it is final.",
+            )
+        )
+    elif not note.is_signed:
         findings.append(
             ComplianceFinding(
                 "signature_pending",

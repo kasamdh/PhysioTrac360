@@ -217,10 +217,29 @@ function OverviewPanel({ workspace, patientId }: { workspace: PatientWorkspaceDa
 function DocumentationPanel({ workspace, patientId, refresh, report }: { workspace: PatientWorkspaceData; patientId: string; refresh: () => Promise<void>; report: (message: string) => void }) {
   const clinical = workspace.clinical!;
   return <div className="workspace-panel-grid">
+    <ClinicalNotesPanel notes={clinical.notes} patientId={patientId} />
     <DraftPanel artifacts={clinical.artifacts} patientId={patientId} canSign={workspace.permissions.canSignNotes} refresh={refresh} report={report} />
     <VoicePanel captures={clinical.voiceCaptures} patientId={patientId} refresh={refresh} report={report} />
     <DocumentsPanel patientId={patientId} report={report} />
   </div>;
+}
+
+function ClinicalNotesPanel({ notes, patientId }: { notes: NonNullable<PatientWorkspaceData["clinical"]>["notes"]; patientId: string }) {
+  return <article className="surface-card">
+    <header className="card-heading">
+      <div><p className="eyebrow">Documentation</p><h3>Clinical notes</h3></div>
+      <a className="secondary-button" href="#documentation">Open Documentation</a>
+    </header>
+    {notes.length ? <ul className="agenda-list">
+      {notes.map((note) => (
+        <li key={note.id}>
+          <time><strong>{formatDate(note.serviceDate, { month: "short", day: "numeric" })}</strong></time>
+          <span><strong>{note.noteTypeLabel}</strong><small>{note.therapistName}</small></span>
+          <a className="status-pill" href={`#documentation/${patientId}/${note.id}`}>{note.statusLabel}</a>
+        </li>
+      ))}
+    </ul> : <p className="empty-copy">No clinical notes have been started for this patient yet.</p>}
+  </article>;
 }
 
 function formatFileSize(bytes: number): string {

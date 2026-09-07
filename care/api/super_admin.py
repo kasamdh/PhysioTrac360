@@ -1,6 +1,7 @@
 """Super-admin-only client management API."""
 from __future__ import annotations
 
+from datetime import date
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.contrib.auth.password_validation import validate_password
@@ -14,7 +15,7 @@ from django.middleware.csrf import get_token
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from ..access import require_platform_super_admin
-from ..client_management import archive_client, activate_client, issue_invitation, provision_client, serialize_client, suspend_client
+from ..client_management import archive_client, activate_client, invitation_activation_url, issue_invitation, provision_client, serialize_client, suspend_client
 from ..models import (
     Appointment,
     AuditEvent,
@@ -24,9 +25,13 @@ from ..models import (
     Patient,
     PrivilegedAccessGrant,
     User,
+    UserLicense,
+    UserSession,
 )
 from ..privileged_access import ALLOWED_DURATIONS_HOURS, active_grant, request_privileged_access, revoke_privileged_access
 from ..services import outcome_trends, record_audit_event
+from ..user_management import apply_status_action, sweep_expired_licenses
+from ..session_management import revoke_all_sessions_for_user, serialize_session
 from .serializers import (
     serialize_appointment,
     serialize_audit_event,
@@ -35,6 +40,7 @@ from .serializers import (
     serialize_outcome_trend,
     serialize_patient,
     serialize_user,
+    serialize_user_license,
 )
 from .utils import api_error, api_login_required, json_body
 
@@ -63,7 +69,16 @@ def require_super_admin(request):
     require_platform_super_admin(request.user)
 
 
+def _isoformat(value):
+    return value.isoformat() if value else None
+
+
+def _actor_name(user) -> str | None:
+    return (user.get_full_name() or user.username) if user else None
+
+
 def serialize_client_user(user: User) -> dict:
+    effective_status = user.effective_status
     return {
         "id": str(user.pk),
         "name": user.get_full_name() or user.username,
@@ -74,10 +89,31 @@ def serialize_client_user(user: User) -> dict:
         "role": user.role,
         "roleLabel": user.get_role_display(),
         "active": user.is_active,
+        "credential": user.credential,
+        "licenses": [serialize_user_license(license) for license in user.licenses.all()],
+        "licenseAlertStatus": user.license_alert_status,
+        "licenseDaysRemaining": user.license_days_remaining,
         "mustUseMfa": user.must_use_mfa,
-        "archivedAt": user.archived_at.isoformat() if user.archived_at else None,
+        "archivedAt": _isoformat(user.archived_at),
         "clientNumber": user.organization.client_number if user.organization_id else None,
         "clientName": user.organization.name if user.organization_id else None,
+        "status": effective_status,
+        "statusLabel": User.Status(effective_status).label,
+        "lastLogin": _isoformat(user.last_login),
+        "failedLoginAttempts": user.failed_login_attempts,
+        "lastFailedLoginAt": _isoformat(user.last_failed_login_at),
+        "lockedAt": _isoformat(user.locked_at),
+        "lockedUntil": _isoformat(user.locked_until),
+        "suspendedAt": _isoformat(user.suspended_at),
+        "suspendedBy": _actor_name(user.suspended_by),
+        "suspensionReason": user.suspension_reason,
+        "archivedBy": _actor_name(user.archived_by),
+        "statusChangedAt": _isoformat(user.status_changed_at),
+        "statusChangedBy": _actor_name(user.status_changed_by),
+        "activeSessions": [
+            serialize_session(session)
+            for session in user.sessions.filter(revoked_at__isnull=True, expires_at__gt=timezone.now()).order_by("-created_at")
+        ],
     }
 
 
@@ -104,6 +140,15 @@ def _create_client_user(client: Organization, payload: dict, actor: User, reques
         with transaction.atomic():
             user.full_clean()
             user.save()
+            if user.role in ASSIGNED_CLINICIAN_ROLES and _string_value(payload, "licenseNumber"):
+                license = UserLicense(
+                    user=user,
+                    license_number=_string_value(payload, "licenseNumber"),
+                    issuing_state=_string_value(payload, "licenseIssuingState"),
+                    expires_at=_parse_license_date(payload.get("licenseExpiresAt")),
+                )
+                license.full_clean()
+                license.save()
             record_audit_event(
                 actor=actor,
                 action="client_user.created",
@@ -136,6 +181,21 @@ def _apply_user_update(account: User, payload: dict, actor: User, request) -> tu
             validate_email(str(payload["email"]))
         except ValidationError:
             errors["email"] = "Enter a valid email address."
+    if "username" in payload:
+        username = _string_value(payload, "username")
+        if not username:
+            errors["username"] = "Username is required."
+        elif User.objects.filter(username=username).exclude(pk=account.pk).exists():
+            errors["username"] = "This username is already in use."
+    new_password = payload.get("password", "")
+    if isinstance(new_password, str):
+        if new_password:
+            try:
+                validate_password(new_password, account)
+            except ValidationError as exc:
+                errors["password"] = " ".join(exc.messages)
+    elif "password" in payload:
+        errors["password"] = "Enter a valid password."
     requested_role = str(payload.get("role", account.role))
     if "role" in payload and requested_role not in TENANT_USER_ROLES:
         errors["role"] = "Choose a tenant-scoped user role."
@@ -146,7 +206,8 @@ def _apply_user_update(account: User, payload: dict, actor: User, request) -> tu
         return None, errors, 422
 
     requested_active = bool(payload.get("active", account.is_active))
-    soft_delete = bool(payload.get("archive"))
+    soft_delete = payload.get("archive") is True
+    restore = payload.get("archive") is False and account.archived_at is not None
     if soft_delete:
         requested_active = False
 
@@ -195,6 +256,12 @@ def _apply_user_update(account: User, payload: dict, actor: User, request) -> tu
             locked_account.last_name = _string_value(payload, "lastName")
         if "email" in payload:
             locked_account.email = _string_value(payload, "email")
+        if "username" in payload:
+            locked_account.username = _string_value(payload, "username")
+        password_changed = bool(new_password)
+        if password_changed:
+            locked_account.set_password(new_password)
+            locked_account.must_change_password = True
         if "role" in payload:
             locked_account.role = requested_role
         if "credential" in payload:
@@ -206,6 +273,16 @@ def _apply_user_update(account: User, payload: dict, actor: User, request) -> tu
         if soft_delete:
             locked_account.archived_at = timezone.now()
             locked_account.archived_by = actor
+            locked_account.status = User.Status.DELETED
+        elif restore:
+            locked_account.archived_at = None
+            locked_account.archived_by = None
+            locked_account.status = User.Status.ACTIVE
+        elif "active" in payload and locked_account.status in (User.Status.ACTIVE, User.Status.INACTIVE):
+            # Only sync the Active/Inactive axis here — a Suspended or Locked
+            # Out account is governed exclusively by the dedicated status-action
+            # endpoint (see `user_status_action`), never by this legacy field.
+            locked_account.status = User.Status.ACTIVE if requested_active else User.Status.INACTIVE
 
         try:
             locked_account.full_clean()
@@ -215,6 +292,8 @@ def _apply_user_update(account: User, payload: dict, actor: User, request) -> tu
 
         if soft_delete:
             action = "client_user.archived"
+        elif restore:
+            action = "client_user.restored"
         elif previous_active and not locked_account.is_active:
             action = "client_user.deactivated"
         elif not previous_active and locked_account.is_active:
@@ -223,6 +302,8 @@ def _apply_user_update(account: User, payload: dict, actor: User, request) -> tu
             action = "client_user.role_changed"
         elif previous_mfa_policy != locked_account.must_use_mfa:
             action = "client_user.mfa_policy_changed"
+        elif password_changed:
+            action = "client_user.password_reset"
         else:
             action = "client_user.updated"
         record_audit_event(
@@ -238,12 +319,27 @@ def _apply_user_update(account: User, payload: dict, actor: User, request) -> tu
                 "mfa_policy_required": locked_account.must_use_mfa,
             },
         )
+        if password_changed:
+            revoke_all_sessions_for_user(locked_account, UserSession.RevokedReason.PASSWORD_RESET, actor=actor, request=request)
     return locked_account, None, 200
 
 
 def _string_value(payload: dict, key: str) -> str:
     value = payload.get(key, "")
     return value.strip() if isinstance(value, str) else ""
+
+
+def _parse_license_date(value) -> date | None:
+    """Parse an ISO date string from a payload, or None. Callers must validate
+    the format first (see `validate_client_user_payload`) — this silently
+    drops anything unparseable rather than raising, since by the time this
+    runs on the create path validation has already rejected a bad format."""
+    if isinstance(value, str) and value.strip():
+        try:
+            return date.fromisoformat(value.strip())
+        except ValueError:
+            return None
+    return None
 
 
 def validate_client_user_payload(payload: dict) -> dict[str, str]:
@@ -276,6 +372,18 @@ def validate_client_user_payload(payload: dict) -> dict[str, str]:
             errors["email"] = "Enter a valid email address."
     if role and role not in TENANT_USER_ROLES:
         errors["role"] = "Choose a tenant-scoped user role."
+    if role in ASSIGNED_CLINICIAN_ROLES:
+        if not _string_value(payload, "licenseNumber"):
+            errors["licenseNumber"] = "License number is required."
+        if not _string_value(payload, "licenseIssuingState"):
+            errors["licenseIssuingState"] = "Issuing state is required."
+        expires_raw = _string_value(payload, "licenseExpiresAt")
+        if not expires_raw:
+            errors["licenseExpiresAt"] = "License expiration date is required."
+        elif _parse_license_date(expires_raw) is None:
+            errors["licenseExpiresAt"] = "Enter a valid date."
+    elif _string_value(payload, "licenseExpiresAt") and _parse_license_date(payload.get("licenseExpiresAt")) is None:
+        errors["licenseExpiresAt"] = "Enter a valid date."
     if isinstance(password, str) and isinstance(confirm_password, str):
         if password and confirm_password and password != confirm_password:
             errors["confirmPassword"] = "The passwords do not match."
@@ -453,6 +561,7 @@ def all_users(request):
             return JsonResponse({"detail": "Please correct the highlighted fields.", "errors": errors}, status=422)
         return JsonResponse({"user": serialize_client_user(user)}, status=201)
 
+    sweep_expired_licenses(User.objects.filter(organization__isnull=False))
     users = User.objects.filter(organization__isnull=False).select_related("organization").order_by(
         "organization__client_number", "last_name", "first_name"
     )
@@ -476,15 +585,14 @@ def all_users(request):
         users = users.filter(organization__client_number=client_number)
     status = request.GET.get("status", "").strip()
     include_archived = request.GET.get("includeArchived", "").strip().lower() == "true"
-    if status == "archived":
-        users = users.filter(archived_at__isnull=False)
+    if status and status in User.Status.values:
+        users = users.filter(status=status)
+        include_archived = include_archived or status == User.Status.DELETED
+    elif status == "archived":
+        users = users.filter(status=User.Status.DELETED)
         include_archived = True
-    elif status == "active":
-        users = users.filter(is_active=True)
-    elif status == "inactive":
-        users = users.filter(is_active=False)
     if not include_archived:
-        users = users.filter(archived_at__isnull=True)
+        users = users.exclude(status=User.Status.DELETED)
     try:
         page_size = min(max(int(request.GET.get("pageSize", "25")), 10), 100)
         page = max(int(request.GET.get("page", "1")), 1)
@@ -529,6 +637,48 @@ def user_detail(request, user_id):
     return JsonResponse({"user": serialize_client_user(updated)})
 
 
+@require_POST
+@api_login_required
+def user_status_action(request, user_id):
+    """Super-admin account-status actions: deactivate/activate, suspend/reactivate,
+    unlock, delete/restore — one confirmed action at a time, each fully audited.
+    """
+    try:
+        require_super_admin(request)
+    except PermissionDenied as exc:
+        return api_error(str(exc), status=403)
+    account = User.objects.filter(pk=user_id, organization__isnull=False).select_related("organization").first()
+    if not account:
+        return api_error("User was not found.", status=404)
+    try:
+        payload = json_body(request)
+    except ValueError as exc:
+        return api_error(str(exc), status=400)
+    action = str(payload.get("action", "")).strip()
+    reason = str(payload.get("reason", "") or "")
+    updated, errors, status_code = apply_status_action(account, action, request.user, reason=reason, request=request)
+    if errors:
+        return JsonResponse({"detail": "Please correct the highlighted fields.", "errors": errors}, status=status_code)
+    return JsonResponse({"user": serialize_client_user(updated)})
+
+
+@require_POST
+@api_login_required
+def user_revoke_sessions(request, user_id):
+    """Super-admin 'Sign Out User From All Devices' — signs the target user
+    out of every active browser/device immediately, fully audited.
+    """
+    try:
+        require_super_admin(request)
+    except PermissionDenied as exc:
+        return api_error(str(exc), status=403)
+    account = User.objects.filter(pk=user_id, organization__isnull=False).first()
+    if not account:
+        return api_error("User was not found.", status=404)
+    count = revoke_all_sessions_for_user(account, UserSession.RevokedReason.ADMIN_REVOKED, actor=request.user, request=request)
+    return JsonResponse({"user": serialize_client_user(account), "revokedCount": count})
+
+
 @require_http_methods(["GET", "POST"])
 @api_login_required
 def client_users(request, client_number: int):
@@ -551,6 +701,7 @@ def client_users(request, client_number: int):
                 status=422,
             )
         return JsonResponse({"user": serialize_client_user(user)}, status=201)
+    sweep_expired_licenses(client.users.all())
     users = client.users.select_related("organization").order_by("last_name", "first_name", "username")
     return JsonResponse(
         {
@@ -745,14 +896,14 @@ def resend_admin_invitation(request, client_number: int):
     client = Organization.objects.filter(client_number=client_number).first()
     if not client:
         return api_error("Client was not found.", status=404)
-    administrator = client.users.filter(role=User.Role.ADMIN).order_by("created_at").first()
+    administrator = client.users.filter(role=User.Role.ADMIN).order_by("date_joined").first()
     if not administrator:
         return api_error("This client has no administrator account.", status=409)
     token = issue_invitation(client, administrator)
     return JsonResponse({
-        "detail": "A new development invitation was generated.",
+        "detail": "A new invitation was generated and emailed to the administrator.",
         "email": administrator.email,
-        "invitationUrl": f"http://localhost:5173/{client.slug}/activate?token={token}",
+        "invitationUrl": invitation_activation_url(client, token),
     })
 
 
@@ -827,7 +978,7 @@ def client_create(request):
             "client": serialize_client(provisioned.organization),
             "administrator": {"id": str(provisioned.administrator.pk), "email": provisioned.administrator.email},
             "developmentInviteToken": provisioned.development_invite_token,
-            "invitationUrl": f"http://localhost:5173/{provisioned.organization.slug}/activate?token={provisioned.development_invite_token}",
+            "invitationUrl": invitation_activation_url(provisioned.organization, provisioned.development_invite_token),
         },
         status=201,
     )

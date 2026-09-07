@@ -4,7 +4,7 @@ import type { WorkspaceUser } from "../api/types";
 import { AppFooter } from "./AppFooter";
 import { HomeTopBar } from "./HomeTopBar";
 
-export type WorkspacePage = "dashboard" | "schedule" | "patients" | "safety" | "clients" | "users" | "clinic-settings" | "reports" | "admin-hub";
+export type WorkspacePage = "dashboard" | "schedule" | "patients" | "documentation" | "safety" | "clients" | "users" | "clinic-settings" | "reports" | "admin-hub";
 
 interface AppShellProps {
   user: WorkspaceUser;
@@ -18,6 +18,7 @@ const PAGE_LABELS: Record<WorkspacePage, string> = {
   dashboard: "Home",
   schedule: "Scheduling",
   patients: "Patients",
+  documentation: "Documentation",
   safety: "Safety & Audit",
   users: "Users",
   "clinic-settings": "Administration",
@@ -35,6 +36,7 @@ export function AppShell({ user, page, onNavigate, onLogout, children }: AppShel
     : [
         ...(user.capabilities.canManageSchedule ? [{ key: "schedule" as const, label: "Schedule", icon: "◷" }] : []),
         { key: "patients" as const, label: "Patients", icon: "◉" },
+        ...(user.capabilities.canAccessClinical ? [{ key: "documentation" as const, label: "Documentation", icon: "▤" }] : []),
         ...(user.capabilities.canManageAccess ? [{ key: "users" as const, label: "Users", icon: "◈" }] : []),
         ...(user.capabilities.canReviewAudit ? [{ key: "safety" as const, label: "Safety", icon: "S" }] : []),
         ...(user.role === "admin"
