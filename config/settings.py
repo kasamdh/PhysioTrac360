@@ -179,6 +179,14 @@ LICENSE_WARNING_DAYS = [
     int(days) for days in os.getenv("LICENSE_WARNING_DAYS", "90,60,30,14,7").split(",") if days.strip()
 ]
 
+# Plan-of-care expiration: escalating day-count thresholds a patient's active
+# plan of care (the most recently documented plan_of_care_end date) warns at.
+# Expiration itself (days remaining < 0) surfaces as a high-severity, blocking
+# dashboard/workspace finding via services.patient_compliance_findings.
+PLAN_OF_CARE_WARNING_DAYS = [
+    int(days) for days in os.getenv("PLAN_OF_CARE_WARNING_DAYS", "30,14,7").split(",") if days.strip()
+]
+
 # Maximum concurrent active sessions per role. A role not listed here (e.g. a
 # future role) is unlimited by omission rather than silently blocked.
 SESSION_LIMITS_BY_ROLE = {

@@ -45,7 +45,13 @@ from .models import (
     UserLicense,
     UserSession,
 )
-from .services import compose_draft, goal_suggestions, note_compliance_findings, record_audit_event
+from .services import (
+    compose_draft,
+    goal_suggestions,
+    note_compliance_findings,
+    patient_compliance_findings,
+    record_audit_event,
+)
 
 
 class SubscriptionFoundationTests(TestCase):
@@ -4117,6 +4123,104 @@ class LicenseExpirationTests(TestCase):
         other_therapist.refresh_from_db()
         self.assertEqual(self.therapist.status, User.Status.SUSPENDED)
         self.assertEqual(other_therapist.status, User.Status.SUSPENDED)
+
+
+class PlanOfCareAlertTests(TestCase):
+    """Patient.plan_of_care_alert_tier/color_bucket and the corresponding
+    patient_compliance_findings() entries, mirroring UserLicense's already-
+    tested expiry-alert pattern."""
+
+    def setUp(self):
+        self.organization = Organization.objects.create(name="POC Clinic", slug="poc-clinic")
+        self.therapist = User.objects.create_user(
+            username="poc-therapist", password="safe-test-password",
+            organization=self.organization, role=User.Role.THERAPIST,
+        )
+        self.patient = Patient.objects.create(
+            organization=self.organization,
+            first_name="Jordan",
+            last_name="Patient",
+            date_of_birth="1990-05-01",
+            assigned_therapist=self.therapist,
+        )
+
+    def _note_with_poc_end(self, end_date, service_date=None):
+        return ClinicalNote.objects.create(
+            patient=self.patient,
+            therapist=self.therapist,
+            note_type=ClinicalNote.Type.EVALUATION,
+            service_date=service_date or date.today(),
+            objective="Objective findings.",
+            assessment="Assessment.",
+            plan="Plan.",
+            plan_of_care_start=date.today() - timedelta(days=30),
+            plan_of_care_end=end_date,
+            frequency_per_week=2,
+            duration_weeks=6,
+        )
+
+    def test_patient_with_no_documented_plan_of_care_has_no_alert(self):
+        self.assertIsNone(self.patient.plan_of_care_end_date)
+        self.assertEqual(self.patient.plan_of_care_alert_tier, "none")
+        self.assertEqual(self.patient.plan_of_care_color_bucket, "none")
+
+    def test_plan_of_care_alert_tier_boundaries(self):
+        note = self._note_with_poc_end(date.today() + timedelta(days=30))
+        self.assertEqual(self.patient.plan_of_care_alert_tier, "expiring_30")
+        self.assertEqual(self.patient.plan_of_care_color_bucket, "expiring_soon")
+
+        note.plan_of_care_end = date.today() + timedelta(days=31)
+        note.save(update_fields=["plan_of_care_end"])
+        self.assertEqual(self.patient.plan_of_care_alert_tier, "valid")
+        self.assertEqual(self.patient.plan_of_care_color_bucket, "valid")
+
+        note.plan_of_care_end = date.today() + timedelta(days=14)
+        note.save(update_fields=["plan_of_care_end"])
+        self.assertEqual(self.patient.plan_of_care_alert_tier, "critical_14")
+        self.assertEqual(self.patient.plan_of_care_color_bucket, "critical")
+
+        note.plan_of_care_end = date.today() - timedelta(days=1)
+        note.save(update_fields=["plan_of_care_end"])
+        self.assertEqual(self.patient.plan_of_care_alert_tier, "expired")
+        self.assertEqual(self.patient.plan_of_care_color_bucket, "expired")
+
+    def test_active_plan_of_care_ignores_notes_without_poc_fields(self):
+        self._note_with_poc_end(
+            date.today() + timedelta(days=60), service_date=date.today() - timedelta(days=10)
+        )
+        ClinicalNote.objects.create(
+            patient=self.patient,
+            therapist=self.therapist,
+            note_type=ClinicalNote.Type.DAILY,
+            service_date=date.today(),
+            objective="Objective findings.",
+            assessment="Assessment.",
+            plan="Plan.",
+        )
+        # The most recent note overall has no plan_of_care_end — the older
+        # evaluation note's POC window should still be the one that counts.
+        self.assertEqual(
+            self.patient.plan_of_care_end_date, date.today() + timedelta(days=60)
+        )
+
+    def test_expired_plan_of_care_is_a_blocking_compliance_finding(self):
+        self._note_with_poc_end(date.today() - timedelta(days=1))
+        findings = {f.code: f for f in patient_compliance_findings(self.patient)}
+        self.assertIn("poc_expired", findings)
+        self.assertTrue(findings["poc_expired"].finalization_blocker)
+
+    def test_expiring_plan_of_care_is_a_non_blocking_compliance_finding(self):
+        self._note_with_poc_end(date.today() + timedelta(days=7))
+        findings = {f.code: f for f in patient_compliance_findings(self.patient)}
+        self.assertIn("poc_expiring_soon", findings)
+        self.assertFalse(findings["poc_expiring_soon"].finalization_blocker)
+        self.assertEqual(findings["poc_expiring_soon"].severity, "high")
+
+    def test_valid_plan_of_care_has_no_compliance_finding(self):
+        self._note_with_poc_end(date.today() + timedelta(days=90))
+        codes = {f.code for f in patient_compliance_findings(self.patient)}
+        self.assertNotIn("poc_expiring_soon", codes)
+        self.assertNotIn("poc_expired", codes)
 
 
 class UserLicenseTests(TestCase):

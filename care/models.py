@@ -34,6 +34,32 @@ def organization_logo_upload_path(instance, filename: str) -> str:
     )
 
 
+def expiry_alert_tier(days_remaining: int, warning_days) -> str:
+    """Escalating severity string from a days-remaining count and a set of
+    day-count thresholds: 'expired' (days_remaining < 0), 'critical_N' for a
+    threshold N <= 14, 'expiring_N' for a larger threshold, else 'valid'.
+    Shared by every "expires soon" concept in this codebase (license, plan of
+    care, ...) so each one only supplies its own threshold list."""
+    if days_remaining < 0:
+        return "expired"
+    for threshold in sorted(warning_days):
+        if days_remaining <= threshold:
+            return f"critical_{threshold}" if threshold <= 14 else f"expiring_{threshold}"
+    return "valid"
+
+
+def expiry_color_bucket(tier: str) -> str:
+    """'valid' | 'expiring_soon' | 'critical' | 'expired' — the 4-color
+    grouping badge/banner UI renders from an `expiry_alert_tier` result."""
+    if tier == "expired":
+        return "expired"
+    if tier.startswith("critical_"):
+        return "critical"
+    if tier.startswith("expiring_"):
+        return "expiring_soon"
+    return "valid"
+
+
 class UUIDTimeStampedModel(models.Model):
     """Base model for PHI-bearing records."""
 
@@ -804,6 +830,48 @@ class Patient(UUIDTimeStampedModel):
                 {"assigned_therapist": "Assigned therapist must belong to this organization."}
             )
 
+    @property
+    def _active_plan_of_care_note(self):
+        """The most recently documented note that carries a plan_of_care_end
+        date — i.e. the note that currently defines this patient's active
+        plan of care. Not the same as "most recent note" (a daily note
+        rarely carries POC fields); matches the same source-of-truth notes
+        already query when checking `reassessment_due`."""
+        return (
+            self.notes.filter(plan_of_care_end__isnull=False)
+            .order_by("-service_date", "-created_at")
+            .first()
+        )
+
+    @property
+    def plan_of_care_end_date(self):
+        note = self._active_plan_of_care_note
+        return note.plan_of_care_end if note else None
+
+    @property
+    def plan_of_care_days_remaining(self) -> int | None:
+        end_date = self.plan_of_care_end_date
+        if end_date is None:
+            return None
+        return (end_date - timezone.localdate()).days
+
+    @property
+    def plan_of_care_alert_tier(self) -> str:
+        """'none' (no documented plan of care yet) | 'expired' | 'critical_N'
+        | 'expiring_N' | 'valid'."""
+        days = self.plan_of_care_days_remaining
+        if days is None:
+            return "none"
+        return expiry_alert_tier(days, settings.PLAN_OF_CARE_WARNING_DAYS)
+
+    @property
+    def plan_of_care_color_bucket(self) -> str:
+        """'none' | 'valid' | 'expiring_soon' | 'critical' | 'expired'."""
+        tier = self.plan_of_care_alert_tier
+        if tier == "none":
+            return "none"
+        return expiry_color_bucket(tier)
+
 
 class Referral(UUIDTimeStampedModel):
     """A referral to or from an outside provider, tracked by front-desk staff."""
@@ -998,28 +1066,14 @@ class UserLicense(UUIDTimeStampedModel):
     def alert_tier(self) -> str:
         """Escalating severity, most to least urgent: 'expired', 'critical_7',
         'critical_14', 'expiring_30', 'expiring_60', 'expiring_90', 'valid'."""
-        days = self.days_remaining
-        if days < 0:
-            return "expired"
-        labels = {7: "critical_7", 14: "critical_14", 30: "expiring_30", 60: "expiring_60", 90: "expiring_90"}
-        for threshold in sorted(settings.LICENSE_WARNING_DAYS):
-            if days <= threshold:
-                return labels.get(threshold, f"expiring_{threshold}")
-        return "valid"
+        return expiry_alert_tier(self.days_remaining, settings.LICENSE_WARNING_DAYS)
 
     @property
     def color_bucket(self) -> str:
         """'valid' | 'expiring_soon' | 'critical' | 'expired' — the 4-color
         grouping the badge/banner UI actually renders; `alert_tier` carries
         the precise day-count tier for the banner's message text."""
-        tier = self.alert_tier
-        if tier == "expired":
-            return "expired"
-        if tier.startswith("critical_"):
-            return "critical"
-        if tier.startswith("expiring_"):
-            return "expiring_soon"
-        return "valid"
+        return expiry_color_bucket(self.alert_tier)
 
     def __str__(self) -> str:
         return f"{self.issuing_state} {self.license_number}".strip()

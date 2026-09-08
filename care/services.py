@@ -222,6 +222,27 @@ def patient_compliance_findings(patient: Patient) -> list[ComplianceFinding]:
                     True,
                 )
             )
+    poc_tier = patient.plan_of_care_alert_tier
+    if poc_tier == "expired":
+        findings.append(
+            ComplianceFinding(
+                "poc_expired",
+                "high",
+                "Plan of care has expired",
+                "Certify a new plan of care or discharge the patient.",
+                True,
+            )
+        )
+    elif poc_tier not in ("none", "valid"):
+        days = patient.plan_of_care_days_remaining
+        findings.append(
+            ComplianceFinding(
+                "poc_expiring_soon",
+                "high" if poc_tier.startswith("critical_") else "medium",
+                f"Plan of care expires in {days} day{'s' if days != 1 else ''}",
+                "Schedule recertification or a progress note before the plan of care lapses.",
+            )
+        )
     return findings
 
 
