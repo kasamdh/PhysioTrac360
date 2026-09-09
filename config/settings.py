@@ -1,6 +1,6 @@
-"""Settings for the PhysioTrac360 clinical workspace.
+"""Settings for the Source Motion PT clinical workspace.
 
-PhysioTrac360 is operated by Source Motion Physical Therapy.
+Source Motion PT is operated by Source Motion Physical Therapy.
 
 The defaults are intentionally developer-friendly. Production must supply
 environment variables, managed secrets, encrypted storage, and a PostgreSQL

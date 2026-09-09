@@ -5,7 +5,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex,nofollow">
-  <title>PhysioTrac360 | Source Motion Physical Therapy</title>
+  <title>Source Motion PT</title>
   <link rel="stylesheet" href="{% static 'care/app.css' %}">
 </head>
 <body>
@@ -19,7 +19,7 @@
           {% else %}
             <span class="brand-mark">{{ user.organization.initials }}</span>
           {% endif %}
-          <span><strong>{{ user.organization.name|default:"Source Motion Physical Therapy" }}</strong><small>PhysioTrac360 clinical workspace</small></span>
+          <span><strong>{{ user.organization.name|default:"Source Motion Physical Therapy" }}</strong><small>Source Motion PT clinical workspace</small></span>
         </a>
         <nav class="nav-list">
           <a href="{% url 'dashboard' %}" class="{% if request.resolver_match.url_name == 'dashboard' %}active{% endif %}">

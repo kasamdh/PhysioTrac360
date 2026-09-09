@@ -151,7 +151,7 @@ def react_workspace(request: HttpRequest) -> HttpResponse:
     index_path = settings.FRONTEND_DIST_DIR / "index.html"
     if not index_path.exists():
         return HttpResponse(
-            "React workspace is not built. Run npm.cmd run build in PhysioTrac360/frontend/.",
+            "React workspace is not built. Run npm.cmd run build in the frontend/ directory.",
             status=503,
             content_type="text/plain; charset=utf-8",
         )

@@ -1,4 +1,4 @@
-"""WSGI config for the PhysioTrac360 project."""
+"""WSGI config for the Source Motion PT project."""
 import os
 
 from django.core.wsgi import get_wsgi_application

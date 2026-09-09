@@ -1,4 +1,4 @@
-# PhysioTrac360 — Current Architecture
+# Source Motion PT — Current Architecture
 
 Audit date: 2026-09-08. This document reflects the codebase as it actually
 exists today, verified by reading `care/models.py`, `care/access.py`,

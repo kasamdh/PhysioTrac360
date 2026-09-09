@@ -1,6 +1,6 @@
-# PhysioTrac360
+# Source Motion PT
 
-PhysioTrac360 is the clinical EMR product of Source Motion Physical Therapy.
+Source Motion PT is the clinical EMR system used by Source Motion Physical Therapy.
 
 This is a standalone Django clinical-workspace project located at
 `C:\Users\kasam\Projects\PhysioTrac360`. It does not replace or alter the

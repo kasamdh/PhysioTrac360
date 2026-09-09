@@ -1,4 +1,4 @@
-# PhysioTrac360 — Product Roadmap
+# Source Motion PT — Product Roadmap
 
 Companion to `PHYSIOTRAC360_CURRENT_ARCHITECTURE.md`. Read that first — this
 roadmap only lists what's genuinely missing or partial, phased by the

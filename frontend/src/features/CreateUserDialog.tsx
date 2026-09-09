@@ -5,6 +5,8 @@ import type { ManagedClient } from "../api/types";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogFooter, FormRow } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
+import { US_STATES } from "@/lib/usStates";
 
 interface CreateUserDialogProps {
   onClose: () => void;
@@ -124,7 +126,12 @@ export function CreateUserDialog({ onClose, onCreated }: CreateUserDialogProps) 
               <Input id="create-user-license-number" required value={form.licenseNumber} onChange={(event) => setForm({ ...form, licenseNumber: event.target.value })} className="text-[1.0625rem]" />
             </FormRow>
             <FormRow label="Issuing State" htmlFor="create-user-license-state" error={fieldErrors.licenseIssuingState}>
-              <Input id="create-user-license-state" required value={form.licenseIssuingState} onChange={(event) => setForm({ ...form, licenseIssuingState: event.target.value })} className="text-[1.0625rem]" />
+              <Select id="create-user-license-state" required value={form.licenseIssuingState} onChange={(event) => setForm({ ...form, licenseIssuingState: event.target.value })} className="text-[1.0625rem]">
+                <option value="">Select a state</option>
+                {US_STATES.map((state) => (
+                  <option key={state.code} value={state.code}>{state.name}</option>
+                ))}
+              </Select>
             </FormRow>
             <FormRow label="License Expires" htmlFor="create-user-license-expires" error={fieldErrors.licenseExpiresAt}>
               <Input id="create-user-license-expires" required type="date" value={form.licenseExpiresAt} onChange={(event) => setForm({ ...form, licenseExpiresAt: event.target.value })} className="text-[1.0625rem]" />

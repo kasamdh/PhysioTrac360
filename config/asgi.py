@@ -1,4 +1,4 @@
-"""ASGI config for the PhysioTrac360 project."""
+"""ASGI config for the Source Motion PT project."""
 import os
 
 from django.core.asgi import get_asgi_application

@@ -1,12 +1,10 @@
 {% extends "care/base.html" %}
+{% load static %}
 
 {% block unauthenticated_content %}
   <main class="login-page">
     <section class="login-card" aria-labelledby="login-title">
-      <div class="brand brand-dark">
-        <span class="brand-mark">PT</span>
-        <span><strong>PhysioTrac360</strong><small>Source Motion Physical Therapy</small></span>
-      </div>
+      <img class="login-logo" src="{% static 'care/source-motion-logo.png' %}" alt="Source Motion Physical Therapy">
       <p class="eyebrow">Secure sign-in</p>
       <h1 id="login-title">Welcome back</h1>
       <p class="muted">Sign in to access your assigned clinical workspace.</p>

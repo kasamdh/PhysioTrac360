@@ -51,10 +51,10 @@ export function ModuleGrid<TKey extends string>({ modules, onSelect, ariaLabel }
             {module.icon}
           </span>
           <span className="grid min-w-0 gap-1">
-            <strong className="text-2xl font-semibold tracking-[-0.01em] text-[#202c3f] transition-colors group-hover:text-primary-deep max-[900px]:text-[1.375rem] max-[620px]:text-xl">
+            <strong className="text-2xl font-semibold tracking-[-0.01em] text-[#1c1f23] transition-colors group-hover:text-primary-deep max-[900px]:text-[1.375rem] max-[620px]:text-xl">
               {module.label}
             </strong>
-            <small className="text-base leading-snug text-[#667085] max-[620px]:text-[0.9375rem]">
+            <small className="text-base leading-snug text-[#1c1f23] max-[620px]:text-[0.9375rem]">
               {module.description}
             </small>
           </span>

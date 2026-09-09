@@ -15,26 +15,34 @@
   --color-card: #ffffff;
   --color-card-foreground: #1c1f23;
 
-  --color-primary: #0d9488;
-  --color-primary-deep: #0f766e;
+  /* Source Motion Physical Therapy brand red — matches the crimson palette
+     already established in static/care/app.css (the legacy Django-template
+     stylesheet) and frontend/src/styles.css's --sm-brand family, so every
+     surface in the product uses one consistent red. */
+  --color-primary: #d90429;
+  --color-primary-deep: #b00020;
   --color-primary-foreground: #ffffff;
-  --color-primary-soft: #ccfbf1;
+  --color-primary-soft: #fff0f2;
 
-  --color-secondary: #eef2f1;
+  --color-secondary: #f7f7f8;
   --color-secondary-foreground: #1c1f23;
 
-  --color-muted: #f1f5f6;
-  --color-muted-foreground: #707a84;
+  --color-muted: #f7f7f8;
+  --color-muted-foreground: #6b7280;
 
-  --color-accent: #ccfbf1;
-  --color-accent-foreground: #0f766e;
+  --color-accent: #fff0f2;
+  --color-accent-foreground: #b00020;
 
-  --color-destructive: #dc2626;
+  /* Deliberately a different, darker red than --color-primary (mirroring
+     app.css's own --crimson vs --danger relationship) — delete/archive/
+     suspend actions must stay visually distinguishable from routine
+     primary actions once the brand color itself is red. */
+  --color-destructive: #a81729;
   --color-destructive-foreground: #ffffff;
 
-  --color-border: #dce4ea;
-  --color-input: #c7d0ce;
-  --color-ring: #0d9488;
+  --color-border: #d9d9dd;
+  --color-input: #d9d9dd;
+  --color-ring: #d90429;
 
   --radius: 0.625rem;
 }

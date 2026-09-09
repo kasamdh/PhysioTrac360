@@ -66,7 +66,7 @@ export function ActivateInvitationPage({ token, onActivated }: ActivateInvitatio
           <div className="login-brand-row">
             <div className="login-mark" aria-hidden="true">PT</div>
             <div className="login-brand-copy">
-              <span>{organizationName || "PhysioTrac360"}</span>
+              <span>{organizationName || "Source Motion PT"}</span>
               <small>Welcome to your practice workspace</small>
             </div>
           </div>

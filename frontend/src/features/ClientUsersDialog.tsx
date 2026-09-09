@@ -6,7 +6,9 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogFooter, FormRow } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { LicenseBadge } from "@/components/ui/license-banner";
+import { Select } from "@/components/ui/select";
 import { StatusBadge } from "@/components/ui/status-banner";
+import { US_STATES } from "@/lib/usStates";
 
 interface ClientUsersDialogProps {
   client: ManagedClient;
@@ -123,7 +125,12 @@ export function ClientUsersDialog({ client, onClose }: ClientUsersDialogProps) {
               <Input id="client-user-license-number" required value={form.licenseNumber} onChange={(event) => setForm({ ...form, licenseNumber: event.target.value })} className="text-[1.0625rem]" />
             </FormRow>
             <FormRow label="Issuing State" htmlFor="client-user-license-state" error={fieldErrors.licenseIssuingState}>
-              <Input id="client-user-license-state" required value={form.licenseIssuingState} onChange={(event) => setForm({ ...form, licenseIssuingState: event.target.value })} className="text-[1.0625rem]" />
+              <Select id="client-user-license-state" required value={form.licenseIssuingState} onChange={(event) => setForm({ ...form, licenseIssuingState: event.target.value })} className="text-[1.0625rem]">
+                <option value="">Select a state</option>
+                {US_STATES.map((state) => (
+                  <option key={state.code} value={state.code}>{state.name}</option>
+                ))}
+              </Select>
             </FormRow>
             <FormRow label="License Expires" htmlFor="client-user-license-expires" error={fieldErrors.licenseExpiresAt}>
               <Input id="client-user-license-expires" required type="date" value={form.licenseExpiresAt} onChange={(event) => setForm({ ...form, licenseExpiresAt: event.target.value })} className="text-[1.0625rem]" />

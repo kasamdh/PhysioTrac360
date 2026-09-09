@@ -21,11 +21,11 @@ def send_client_admin_invitation_email(administrator, organization, invitation_u
     """Email a new or reissued activation link to a client's administrator.
     Returns whether the send succeeded (callers may ignore this — the
     invitation link is also always shown on-screen as a fallback)."""
-    subject = f"Set up your PhysioTrac360 administrator account for {organization.name}"
+    subject = f"Set up your Source Motion PT administrator account for {organization.name}"
     greeting = administrator.first_name or administrator.email
     body = (
         f"Hi {greeting},\n\n"
-        f"An administrator account has been created for {organization.name} on PhysioTrac360.\n"
+        f"An administrator account has been created for {organization.name} on Source Motion PT.\n"
         "Set your password to finish activating it:\n\n"
         f"{invitation_url}\n\n"
         "This link expires in 7 days and can only be used once. If you weren't "

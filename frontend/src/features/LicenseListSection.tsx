@@ -7,7 +7,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { LicenseBadge } from "@/components/ui/license-banner";
+import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { US_STATES } from "@/lib/usStates";
 
 interface LicenseListSectionProps {
   licenses: UserLicenseInfo[];
@@ -134,7 +136,12 @@ function LicenseRow({ license, onUpdate, onDelete, onUploadDocument, onVerify, d
         </label>
         <label className="text-sm">
           <span className="mb-1 block font-semibold text-foreground">Issuing State</span>
-          <Input value={draft.issuingState} onChange={(event) => setDraft({ ...draft, issuingState: event.target.value })} />
+          <Select value={draft.issuingState} onChange={(event) => setDraft({ ...draft, issuingState: event.target.value })}>
+            <option value="">Select a state</option>
+            {US_STATES.map((state) => (
+              <option key={state.code} value={state.code}>{state.name}</option>
+            ))}
+          </Select>
         </label>
         <label className="text-sm">
           <span className="mb-1 block font-semibold text-foreground">License Type</span>
@@ -242,7 +249,12 @@ export function LicenseListSection({ licenses, onCreate, onUpdate, onDelete, onU
             </label>
             <label className="text-sm">
               <span className="mb-1 block font-semibold text-foreground">Issuing State</span>
-              <Input required value={draft.issuingState} onChange={(event) => setDraft({ ...draft, issuingState: event.target.value })} />
+              <Select required value={draft.issuingState} onChange={(event) => setDraft({ ...draft, issuingState: event.target.value })}>
+                <option value="">Select a state</option>
+                {US_STATES.map((state) => (
+                  <option key={state.code} value={state.code}>{state.name}</option>
+                ))}
+              </Select>
             </label>
             <label className="text-sm">
               <span className="mb-1 block font-semibold text-foreground">License Type</span>

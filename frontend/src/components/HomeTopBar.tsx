@@ -13,7 +13,7 @@ interface HomeTopBarProps {
 }
 
 export function HomeTopBar({ user, onLogout, onHome, pageLabel = "Home", brandLabel }: HomeTopBarProps) {
-  const organizationName = user.organization?.name || brandLabel || "PhysioTrac360";
+  const organizationName = user.organization?.name || brandLabel || "Source Motion PT";
   const [showSecurity, setShowSecurity] = useState(false);
 
   return (
@@ -21,6 +21,16 @@ export function HomeTopBar({ user, onLogout, onHome, pageLabel = "Home", brandLa
       <div className="home-topbar-left">
         {user.organization?.logoUrl ? (
           <img src={user.organization.logoUrl} alt="" />
+        ) : !user.organization ? (
+          // No organization = the platform-level (super admin) context, not
+          // a specific tenant — safe to show Source Motion's own logo here.
+          // A tenant without its own uploaded logo still falls through to
+          // the generic "PT" mark below, never this deployment's brand.
+          <img
+            src={`${import.meta.env.BASE_URL}assets/source-motion-logo.png`}
+            alt="Source Motion Physical Therapy"
+            className="home-topbar-brand-logo"
+          />
         ) : (
           <span className="home-topbar-mark" aria-hidden="true">
             PT
