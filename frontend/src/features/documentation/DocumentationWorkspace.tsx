@@ -9,6 +9,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { formatDate, formatDateTime } from "@/lib/format";
 import { AddendumDialog } from "./AddendumDialog";
+import { BodyChart, PAIN_QUALITIES, type PainMapPoint } from "./BodyChart";
 import { CosignBanner } from "./CosignBanner";
 import { GoalsSection } from "./GoalsSection";
 import { InterventionTable } from "./InterventionTable";
@@ -75,8 +76,6 @@ const SECTIONS_BY_TYPE: Record<string, { key: string; label: string }[]> = {
   ],
 };
 
-const PAIN_QUALITIES = ["Sharp", "Dull", "Aching", "Burning", "Throbbing", "Numbness", "Tingling", "Other"];
-
 interface SubjectiveDetails {
   chiefComplaint?: string;
   historyOfPresentCondition?: string;
@@ -103,6 +102,7 @@ interface ObjectiveMeasurements {
   rom?: RomRow[];
   strength?: StrengthRow[];
   specialTests?: string;
+  painMap?: PainMapPoint[];
 }
 
 interface DischargeDetails {
@@ -398,6 +398,15 @@ export function DocumentationWorkspace({ patientId, noteId, user, onBack }: Docu
                 </div>
                 {textField("Aggravating Factors", subjectiveDetails.aggravatingFactors || "", (v) => updateSubjectiveDetail({ aggravatingFactors: v }), { disabled: readOnly })}
                 {textField("Relieving Factors", subjectiveDetails.relievingFactors || "", (v) => updateSubjectiveDetail({ relievingFactors: v }), { disabled: readOnly })}
+              </div>
+
+              <div className="mb-4 rounded-md border border-border p-3">
+                <h4 className="m-0 mb-2 text-xs font-bold uppercase tracking-wide text-muted-foreground">Pain / Body Map</h4>
+                <BodyChart
+                  points={objectiveMeasurements.painMap || []}
+                  disabled={readOnly}
+                  onChange={(painMap) => setObjectiveMeasurements((current) => ({ ...current, painMap }))}
+                />
               </div>
 
               <Label htmlFor="subjective-narrative">Additional Subjective Notes</Label>
