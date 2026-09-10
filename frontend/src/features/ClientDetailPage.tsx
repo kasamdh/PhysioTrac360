@@ -8,6 +8,7 @@ import { ClientUsersDialog } from "./ClientUsersDialog";
 import { EditClientDialog } from "./EditClientDialog";
 import { PrivilegedAccessTab } from "./PrivilegedAccessTab";
 import { ReactivateClientDialog } from "./ReactivateClientDialog";
+import { SubscriptionTab } from "./SubscriptionTab";
 import { SuspendClientDialog } from "./SuspendClientDialog";
 
 interface ClientDetailPageProps {
@@ -25,13 +26,6 @@ const TABS: Array<{ id: Tab; label: string }> = [
   { id: "privileged", label: "Clinical Access" },
   { id: "settings", label: "Settings" },
 ];
-
-const TIER_FEATURES: Record<string, string[]> = {
-  starter: ["1 therapist", "Scheduling", "Documentation"],
-  professional: ["5 therapists", "Home exercise programs", "Payments", "Secure messaging"],
-  premium: ["Unlimited therapists", "AI-assisted documentation", "Advanced reporting"],
-  enterprise: ["Custom configuration and limits"],
-};
 
 export function ClientDetailPage({ clientNumber, onBack }: ClientDetailPageProps) {
   const [client, setClient] = useState<ManagedClient | null>(null);
@@ -129,15 +123,7 @@ export function ClientDetailPage({ clientNumber, onBack }: ClientDetailPageProps
         </section>
       )}
 
-      {tab === "subscription" && (
-        <section className="surface-card">
-          <div className="card-heading"><h2>Subscription</h2><button className="secondary-button" onClick={() => setShowEdit(true)}>Change plan</button></div>
-          <p><strong>{client.subscriptionTierLabel}</strong></p>
-          <ul>
-            {(TIER_FEATURES[client.subscriptionTier] || []).map((feature) => <li key={feature}>{feature}</li>)}
-          </ul>
-        </section>
-      )}
+      {tab === "subscription" && <SubscriptionTab clientNumber={client.clientNumber} />}
 
       {tab === "audit" && (
         <section className="surface-card">

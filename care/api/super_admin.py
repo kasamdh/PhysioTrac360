@@ -1,14 +1,15 @@
 """Super-admin-only client management API."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.validators import validate_email
 from django.db import IntegrityError, transaction
-from django.db.models import Q
+from django.db.models import Count, Q
+from django.db.models.functions import TruncDate
 from django.utils import timezone
 from django.http import JsonResponse
 from django.middleware.csrf import get_token
@@ -21,9 +22,13 @@ from ..models import (
     AuditEvent,
     ClientInvitation,
     ClinicalNote,
+    Feature,
+    Location,
     Organization,
+    OrganizationSubscription,
     Patient,
     PrivilegedAccessGrant,
+    SubscriptionPlan,
     User,
     UserLicense,
     UserSession,
@@ -35,10 +40,13 @@ from ..session_management import revoke_all_sessions_for_user, serialize_session
 from .serializers import (
     serialize_appointment,
     serialize_audit_event,
+    serialize_feature,
     serialize_goal,
     serialize_note_summary,
+    serialize_org_subscription,
     serialize_outcome_trend,
     serialize_patient,
+    serialize_plan,
     serialize_user,
     serialize_user_license,
 )
@@ -437,6 +445,348 @@ def validate_client_payload(payload: dict, *, partial=False):
     if payload.get("status") and payload["status"] not in Organization.Status.values:
         errors["status"] = "Choose a supported client status."
     return errors
+
+
+def _serialize_global_audit_event(event) -> dict:
+    """Same shape as serializers.serialize_audit_event, plus which client the
+    event belongs to — needed here because this feed spans every tenant,
+    unlike every other place that serializer is used (already inside one
+    client's own scope)."""
+    payload = serialize_audit_event(event)
+    payload["clientNumber"] = event.organization.client_number if event.organization_id else None
+    payload["clientName"] = event.organization.name if event.organization_id else None
+    return payload
+
+
+@require_GET
+@api_login_required
+def dashboard(request):
+    """Platform-wide operational summary — organization/user/patient counts,
+    credential expiration alerts, recent activity, and failed-login trend.
+    Read-only; every number here is a real aggregate over existing rows, not
+    a fabricated metric (matches admin_config.operational_report's own rule)."""
+    try:
+        require_super_admin(request)
+    except PermissionDenied as exc:
+        return api_error(str(exc), status=403)
+
+    all_orgs = Organization.objects.all()
+    live_orgs = all_orgs.filter(archived_at__isnull=True)
+    organizations = {
+        "total": all_orgs.count(),
+        "active": live_orgs.filter(status=Organization.Status.ACTIVE).count(),
+        "suspended": live_orgs.filter(status=Organization.Status.SUSPENDED).count(),
+        "archived": all_orgs.filter(archived_at__isnull=False).count(),
+    }
+
+    locations_total = Location.objects.filter(organization__archived_at__isnull=True).count()
+
+    tenant_users = User.objects.filter(organization__archived_at__isnull=True)
+    users = {
+        "total": tenant_users.count(),
+        "activePts": tenant_users.filter(role=User.Role.THERAPIST, status=User.Status.ACTIVE).count(),
+        "activePtas": tenant_users.filter(role=User.Role.ASSISTANT, status=User.Status.ACTIVE).count(),
+    }
+
+    patients_total = Patient.objects.filter(organization__archived_at__isnull=True).count()
+
+    # Credential alerts: same computed alert_tier/color_bucket every per-user
+    # license banner already uses (care/models.py UserLicense), just
+    # aggregated across every tenant instead of one user.
+    credential_alerts = {"expired": 0, "critical": 0, "expiring_soon": 0, "valid": 0}
+    for license_row in UserLicense.objects.filter(user__organization__archived_at__isnull=True).only("expires_at"):
+        credential_alerts[license_row.color_bucket] += 1
+
+    subscription_tiers = {
+        row["subscription_tier"]: row["count"]
+        for row in live_orgs.values("subscription_tier").annotate(count=Count("id")).order_by()
+    }
+
+    recent_organizations = [
+        {
+            "clientNumber": org.client_number,
+            "clientName": org.name,
+            "status": org.status,
+            "statusLabel": org.get_status_display(),
+            "createdAt": org.created_at.isoformat(),
+        }
+        for org in live_orgs.order_by("-created_at")[:5]
+    ]
+
+    recent_audit_events = [
+        _serialize_global_audit_event(event)
+        for event in AuditEvent.objects.select_related("actor", "organization").order_by("-created_at")[:15]
+    ]
+
+    activity_actions = {"SESSION_CREATED", "NEW_DEVICE_LOGIN", "LOGIN_FAILED", "USER_LOCKED", "USER_UNLOCKED"}
+    recent_user_activity = [
+        _serialize_global_audit_event(event)
+        for event in AuditEvent.objects.filter(action__in=activity_actions)
+        .select_related("actor", "organization")
+        .order_by("-created_at")[:15]
+    ]
+
+    since = timezone.now() - timedelta(days=7)
+    trend_rows = (
+        AuditEvent.objects.filter(action="LOGIN_FAILED", created_at__gte=since)
+        .annotate(day=TruncDate("created_at"))
+        .values("day")
+        .annotate(count=Count("id"))
+        .order_by("day")
+    )
+    failed_login_trend = [{"date": row["day"].isoformat(), "count": row["count"]} for row in trend_rows]
+
+    return JsonResponse(
+        {
+            "organizations": organizations,
+            "locationsTotal": locations_total,
+            "users": users,
+            "patientsTotal": patients_total,
+            "credentialAlerts": credential_alerts,
+            "subscriptionTiers": subscription_tiers,
+            "recentOrganizations": recent_organizations,
+            "recentAuditEvents": recent_audit_events,
+            "recentUserActivity": recent_user_activity,
+            "failedLoginTrend": failed_login_trend,
+        }
+    )
+
+
+def _required_action_for(color_bucket: str) -> str:
+    if color_bucket == "expired":
+        return "Renew immediately — clinical access is suspended"
+    if color_bucket == "critical":
+        return "Renew immediately"
+    if color_bucket == "expiring_soon":
+        return "Schedule renewal"
+    return "None"
+
+
+@require_GET
+@api_login_required
+def credential_dashboard(request):
+    """Cross-organization PT/PTA license expiration roster — the same
+    alert_tier/color_bucket every per-user license banner already computes
+    (care/models.py UserLicense), listed across every tenant instead of one
+    user. Expired-license auto-suspension itself already happens in
+    user_management.sweep_expired_licenses/suspend_expired_license; this is
+    a read-only view onto that, not a second enforcement path."""
+    try:
+        require_super_admin(request)
+    except PermissionDenied as exc:
+        return api_error(str(exc), status=403)
+
+    include_valid = request.GET.get("includeValid", "").strip().lower() == "true"
+    bucket_filter = {b.strip() for b in request.GET.get("bucket", "").split(",") if b.strip()}
+    query = request.GET.get("q", "").strip()
+    client_number_raw = request.GET.get("clientNumber", "").strip()
+
+    licenses = (
+        UserLicense.objects.filter(user__organization__archived_at__isnull=True)
+        .select_related("user", "user__organization")
+        .prefetch_related("user__provider_profile__locations")
+    )
+    if client_number_raw:
+        try:
+            licenses = licenses.filter(user__organization__client_number=int(client_number_raw))
+        except ValueError:
+            return api_error("clientNumber must be a whole number.", status=400)
+    if query:
+        licenses = licenses.filter(
+            Q(user__first_name__icontains=query)
+            | Q(user__last_name__icontains=query)
+            | Q(license_number__icontains=query)
+            | Q(user__organization__name__icontains=query)
+        )
+
+    rows = []
+    for license_row in licenses:
+        color_bucket = license_row.color_bucket
+        if not include_valid and color_bucket == "valid":
+            continue
+        if bucket_filter and color_bucket not in bucket_filter:
+            continue
+        provider = license_row.user.provider_profile.first()
+        location_names = ", ".join(location.name for location in provider.locations.all()) if provider else ""
+        rows.append(
+            {
+                "licenseId": str(license_row.pk),
+                "providerId": str(license_row.user_id),
+                "providerName": license_row.user.get_full_name() or license_row.user.username,
+                "providerRole": license_row.user.role,
+                "providerRoleLabel": license_row.user.get_role_display(),
+                "clientNumber": license_row.user.organization.client_number,
+                "clientName": license_row.user.organization.name,
+                "location": location_names,
+                "licenseType": license_row.license_type,
+                "licenseNumber": license_row.license_number,
+                "issuingState": license_row.issuing_state,
+                "expiresAt": license_row.expires_at.isoformat(),
+                "daysRemaining": license_row.days_remaining,
+                "alertTier": license_row.alert_tier,
+                "colorBucket": color_bucket,
+                "requiredAction": _required_action_for(color_bucket),
+                "accountStatus": license_row.user.status,
+            }
+        )
+
+    rows.sort(key=lambda row: row["daysRemaining"])
+
+    try:
+        page_size = min(max(int(request.GET.get("pageSize", "50")), 10), 200)
+        page = max(int(request.GET.get("page", "1")), 1)
+    except ValueError:
+        return api_error("Page and page size must be whole numbers.", status=400)
+    total = len(rows)
+    page_rows = rows[(page - 1) * page_size : page * page_size]
+
+    return JsonResponse({"licenses": page_rows, "total": total, "page": page, "pageSize": page_size})
+
+
+@require_GET
+@api_login_required
+def features(request):
+    """The platform-wide feature catalog (see seed_subscription_catalog)."""
+    try:
+        require_super_admin(request)
+    except PermissionDenied as exc:
+        return api_error(str(exc), status=403)
+    rows = Feature.objects.filter(is_active=True).order_by("name")
+    return JsonResponse({"features": [serialize_feature(feature) for feature in rows]})
+
+
+@require_GET
+@api_login_required
+def plans(request):
+    """The platform-wide subscription plan catalog."""
+    try:
+        require_super_admin(request)
+    except PermissionDenied as exc:
+        return api_error(str(exc), status=403)
+    rows = SubscriptionPlan.objects.filter(is_active=True).prefetch_related("features").order_by("monthly_price", "name")
+    return JsonResponse({"plans": [serialize_plan(plan) for plan in rows]})
+
+
+def _date_to_aware_datetime(value: date):
+    return timezone.make_aware(datetime.combine(value, time.min))
+
+
+@require_http_methods(["GET", "PATCH"])
+@api_login_required
+def client_subscription(request, client_number: int):
+    """View or assign one organization's subscription (plan, status,
+    billing cycle, dates, seat count) and its effective feature set.
+    Creating/changing the plan resets the feature set to that plan's
+    baseline unless the request also supplies an explicit `features` list —
+    which is also how a super admin grants/revokes an individual feature
+    without changing plans (the per-organization "feature flag" override
+    the product brief asks for)."""
+    try:
+        require_super_admin(request)
+    except PermissionDenied as exc:
+        return api_error(str(exc), status=403)
+    client = Organization.objects.filter(client_number=client_number).first()
+    if not client:
+        return api_error("Client was not found.", status=404)
+    subscription = client.subscriptions.order_by("-starts_at").first()
+
+    if request.method == "GET":
+        return JsonResponse(
+            {
+                "subscription": serialize_org_subscription(subscription),
+                "plans": [serialize_plan(plan) for plan in SubscriptionPlan.objects.filter(is_active=True).prefetch_related("features").order_by("monthly_price", "name")],
+                "features": [serialize_feature(feature) for feature in Feature.objects.filter(is_active=True).order_by("name")],
+            }
+        )
+
+    try:
+        payload = json_body(request)
+    except ValueError as exc:
+        return api_error(str(exc), status=400)
+
+    plan = None
+    plan_code = payload.get("planCode")
+    if plan_code:
+        plan = SubscriptionPlan.objects.filter(code=plan_code, is_active=True).first()
+        if not plan:
+            return api_error("Choose a valid subscription plan.", status=422)
+
+    creating = subscription is None
+    if creating and not plan:
+        return api_error("A plan is required to start a subscription.", status=422)
+
+    changed_fields = []
+    plan_changed = False
+    with transaction.atomic():
+        if creating:
+            subscription = OrganizationSubscription(organization=client, plan=plan)
+            changed_fields.append("plan")
+            plan_changed = True
+        elif plan and subscription.plan_id != plan.pk:
+            subscription.plan = plan
+            changed_fields.append("plan")
+            plan_changed = True
+
+        if "status" in payload:
+            if payload["status"] not in OrganizationSubscription.Status.values:
+                return api_error("Choose a valid subscription status.", status=422)
+            subscription.status = payload["status"]
+            changed_fields.append("status")
+
+        if "billingCycle" in payload:
+            if payload["billingCycle"] not in OrganizationSubscription.BillingCycle.values:
+                return api_error("Choose a valid billing cycle.", status=422)
+            subscription.billing_cycle = payload["billingCycle"]
+            changed_fields.append("billing_cycle")
+
+        if "providerSeatCount" in payload:
+            try:
+                seat_count = int(payload["providerSeatCount"])
+            except (TypeError, ValueError):
+                return api_error("Seat count must be a whole number.", status=422)
+            if seat_count < 1:
+                return api_error("Seat count must be at least 1.", status=422)
+            subscription.provider_seat_count = seat_count
+            changed_fields.append("provider_seat_count")
+
+        if payload.get("startsAt"):
+            parsed = _parse_license_date(payload["startsAt"])
+            if parsed is None:
+                return api_error("Enter a valid start date.", status=422)
+            subscription.starts_at = _date_to_aware_datetime(parsed)
+            changed_fields.append("starts_at")
+
+        if "endsAt" in payload:
+            if payload["endsAt"]:
+                parsed = _parse_license_date(payload["endsAt"])
+                if parsed is None:
+                    return api_error("Enter a valid end date.", status=422)
+                subscription.ends_at = _date_to_aware_datetime(parsed)
+            else:
+                subscription.ends_at = None
+            changed_fields.append("ends_at")
+
+        subscription.full_clean()
+        subscription.save()
+
+        explicit_features = payload.get("features")
+        if explicit_features is not None:
+            if not isinstance(explicit_features, list):
+                return api_error("Features must be a list of feature codes.", status=422)
+            subscription.features.set(Feature.objects.filter(code__in=explicit_features, is_active=True))
+            changed_fields.append("features")
+        elif plan_changed:
+            subscription.features.set(plan.features.all())
+            changed_fields.append("features")
+
+    record_audit_event(
+        actor=request.user,
+        action="client_subscription.created" if creating else "client_subscription.updated",
+        obj=subscription,
+        request=request,
+        metadata={"client_number": client.client_number, "changed_fields": changed_fields},
+    )
+    return JsonResponse({"subscription": serialize_org_subscription(subscription)})
 
 
 @require_GET

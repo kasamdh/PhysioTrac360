@@ -15,7 +15,7 @@ from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
-from django.views.decorators.http import require_GET, require_POST
+from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from ..access import (
     BILLING_ROLES,
@@ -27,15 +27,23 @@ from ..access import (
     require_patient_access,
     require_role,
 )
+from ..entitlements import organization_has_feature
+from ..notifications import send_secure_message_notification_email
+from ..outcome_scoring import PATIENT_SELF_REPORT_MEASURES
 from ..models import (
     AIArtifact,
     Appointment,
     AuditEvent,
+    Authorization,
     ClinicalNote,
     Consent,
+    EpisodeOfCare,
+    FormSubmission,
     FunctionalGoal,
+    HomeExercise,
     HomeProgram,
     IntakeSubmission,
+    OutcomeAssignment,
     OutcomeScore,
     Patient,
     PaymentRecord,
@@ -59,9 +67,15 @@ from .serializers import (
     serialize_appointment,
     serialize_artifact,
     serialize_audit_event,
+    serialize_authorization,
     serialize_consent,
+    serialize_episode_of_care,
+    serialize_form_submission_detail,
+    serialize_form_submission_summary,
     serialize_goal,
+    serialize_home_exercise,
     serialize_home_program,
+    serialize_outcome_assignment,
     serialize_intake,
     serialize_message,
     serialize_note_summary,
@@ -327,13 +341,19 @@ def _clinical_workspace(patient: Patient) -> dict:
         patient.home_programs.select_related("prescribed_by").prefetch_related("exercises").all()[:8]
     )
     captures = list(patient.voice_captures.select_related("therapist").all()[:8])
+    episodes = list(patient.episodes_of_care.select_related("primary_therapist").all()[:12])
     return {
+        "episodesOfCare": [serialize_episode_of_care(episode) for episode in episodes],
         "notes": [_note_payload(note) for note in notes],
         "goals": [
             serialize_goal(goal, include_clinical_details=True)
             for goal in patient.goals.select_related("approved_by").all()[:12]
         ],
         "outcomes": [serialize_outcome_trend(item) for item in outcome_trends(patient)],
+        "outcomeAssignments": [
+            serialize_outcome_assignment(assignment)
+            for assignment in patient.outcome_assignments.select_related("assigned_by").all()[:12]
+        ],
         "complianceFindings": [
             {
                 "code": finding.code,
@@ -377,18 +397,35 @@ def _operations_workspace(request, patient: Patient) -> dict:
             }
             for user in User.objects.filter(organization=organization, is_active=True)
             .exclude(pk=request.user.pk)
+            # Other patients' portal accounts are never a valid recipient in
+            # any chart — only this specific patient's own portal_user (added
+            # back below, if linked) may ever appear here.
+            .exclude(role=User.Role.PATIENT)
             .order_by("last_name", "first_name", "username")
         ],
         "canManageSchedule": can_manage_schedule,
         "canManageBilling": can_manage_billing,
         "canCollectPayments": can_collect_payments,
     }
+    if patient.portal_user_id and patient.portal_user.is_active:
+        payload["recipients"].insert(
+            0,
+            {
+                "id": str(patient.portal_user_id),
+                "displayName": f"{patient.full_name} (patient portal)",
+                "roleLabel": "Patient",
+            },
+        )
     if can_manage_schedule:
         payload["consents"] = [
             serialize_consent(consent)
             for consent in patient.consents.select_related("recorded_by").all()[:12]
         ]
         payload["intakes"] = [serialize_intake(intake) for intake in patient.intakes.all()[:12]]
+        payload["formSubmissions"] = [
+            serialize_form_submission_summary(submission)
+            for submission in patient.form_submissions.select_related("template").order_by("-created_at")[:12]
+        ]
         payload["referrals"] = [
             serialize_referral(referral) for referral in patient.referrals.select_related("created_by").all()[:12]
         ]
@@ -418,6 +455,10 @@ def _operations_workspace(request, patient: Patient) -> dict:
             serialize_superbill(superbill)
             for superbill in patient.superbills.select_related("clinician").all()[:24]
         ]
+        payload["authorizations"] = [
+            serialize_authorization(authorization)
+            for authorization in patient.authorizations.select_related("episode_of_care").all()[:24]
+        ]
     if can_collect_payments:
         payload["payments"] = [
             serialize_payment(payment)
@@ -445,13 +486,14 @@ def patient_workspace(request, patient_id: str):
         return error
 
     payload = {
-        "patient": serialize_patient(patient, include_clinical=clinical_allowed),
+        "patient": serialize_patient(patient, include_clinical=clinical_allowed, include_portal_status=True),
         "permissions": {
             "canAccessClinical": clinical_allowed,
             "canManageOperations": operations_allowed,
             "canSignNotes": request.user.can_sign_notes,
             "canManageBilling": request.user.role in BILLING_ROLES,
             "canReviewAudit": request.user.role in AUDIT_REVIEW_ROLES,
+            "canManagePortalAccess": request.user.role in (CLINICAL_ROLES | SCHEDULING_ROLES),
         },
     }
     if clinical_allowed:
@@ -500,6 +542,11 @@ def draft_create(request, patient_id: str):
     patient, error = _clinical_patient_or_error(request, patient_id)
     if error:
         return error
+    if not organization_has_feature(patient.organization, "ai_scribe"):
+        return api_error(
+            "AI-assisted documentation drafts are not enabled for this organization. Contact your administrator.",
+            status=403,
+        )
     payload, error = _payload_or_error(request)
     if error:
         return error
@@ -520,6 +567,7 @@ def draft_create(request, patient_id: str):
         source_note_ids=source["source_note_ids"],
         source_fingerprint=source["source_fingerprint"],
         draft_text=source["draft_text"],
+        sections=source.get("sections", []),
     )
     record_audit_event(
         actor=request.user,
@@ -546,6 +594,10 @@ def artifact_review(request, artifact_id: str):
     if error:
         return error
     action = payload.get("action")
+
+    if action == "section_review":
+        return _artifact_section_review(request, artifact, payload)
+
     review_note, error = _optional_text(payload, "reviewNote", limit=1000)
     if error:
         return error
@@ -565,13 +617,16 @@ def artifact_review(request, artifact_id: str):
         }.get(artifact.kind)
         if not note_type:
             return api_error("This draft type cannot be applied to a clinical note.", status=409)
+        assessment_text, error_response = _assessment_text_for_apply(artifact)
+        if error_response:
+            return error_response
         note = ClinicalNote(
             patient=artifact.patient,
             therapist=request.user,
             note_type=note_type,
             diagnosis_snapshot=artifact.patient.diagnoses,
             precautions_snapshot=artifact.patient.precautions,
-            assessment=artifact.draft_text,
+            assessment=assessment_text,
             status=ClinicalNote.Status.DRAFT,
         )
         error_response = _save_or_error(note)
@@ -580,7 +635,7 @@ def artifact_review(request, artifact_id: str):
         artifact.status = AIArtifact.Status.APPLIED
         artifact.applied_note = note
     else:
-        return api_error("Choose approve, reject, or apply.", status=400)
+        return api_error("Choose approve, reject, apply, or section_review.", status=400)
 
     artifact.review_note = review_note
     artifact.reviewed_by = request.user
@@ -600,6 +655,77 @@ def artifact_review(request, artifact_id: str):
     if note:
         response["appliedNote"] = _note_payload(note)
     return JsonResponse(response)
+
+
+def _assessment_text_for_apply(artifact: AIArtifact) -> tuple[str, JsonResponse | None]:
+    """Only accepted/edited sections are copied into the applied note's
+    Assessment field; rejected sections are dropped entirely. Kinds with no
+    section breakdown fall back to the single reviewed draft_text block."""
+    if not artifact.sections:
+        return artifact.draft_text, None
+    if any(section["status"] == AIArtifact.SectionStatus.PENDING for section in artifact.sections):
+        return "", api_error("Review every section (accept, edit, or reject) before applying this draft.", status=409)
+    blocks = [
+        "%s:\n%s" % (section["label"], section["reviewedText"] or section["draftText"])
+        for section in artifact.sections
+        if section["status"] in (AIArtifact.SectionStatus.ACCEPTED, AIArtifact.SectionStatus.EDITED)
+    ]
+    return "\n\n".join(blocks), None
+
+
+def _artifact_section_review(request, artifact: AIArtifact, payload: dict) -> JsonResponse:
+    if artifact.status not in (AIArtifact.Status.DRAFT, AIArtifact.Status.APPROVED):
+        return api_error("This draft can no longer be reviewed section-by-section.", status=409)
+    if not artifact.sections:
+        return api_error("This draft has no individually reviewable sections.", status=409)
+
+    section_key = payload.get("sectionKey")
+    section = next((s for s in artifact.sections if s["key"] == section_key), None)
+    if section is None:
+        return api_error("Choose a valid section.", status=400)
+
+    section_status = payload.get("sectionStatus")
+    valid_statuses = {
+        AIArtifact.SectionStatus.ACCEPTED,
+        AIArtifact.SectionStatus.EDITED,
+        AIArtifact.SectionStatus.REJECTED,
+    }
+    if section_status not in valid_statuses:
+        return api_error("Choose accepted, edited, or rejected for this section.", status=400)
+
+    reviewed_text = ""
+    if section_status == AIArtifact.SectionStatus.EDITED:
+        reviewed_text, error = _required_section_text(payload)
+        if error:
+            return error
+
+    section["status"] = section_status
+    section["reviewedText"] = reviewed_text
+    artifact.sections = [dict(s) for s in artifact.sections]  # reassign so the JSONField is written
+    artifact.reviewed_by = request.user
+    artifact.reviewed_at = timezone.now()
+    error_response = _save_or_error(artifact)
+    if error_response:
+        return error_response
+    record_audit_event(
+        actor=request.user,
+        action="ai_draft.section_reviewed",
+        obj=artifact,
+        patient=artifact.patient,
+        request=request,
+        metadata={"kind": artifact.kind, "section_key": section_key, "section_status": section_status},
+    )
+    return JsonResponse({"artifact": serialize_artifact(artifact, include_draft_text=True)})
+
+
+def _required_section_text(payload: dict):
+    value = payload.get("reviewedText", "")
+    if not isinstance(value, str) or not value.strip():
+        return None, api_error("Provide the edited text for this section.", status=400)
+    value = value.strip()
+    if len(value) > 20000:
+        return None, api_error("Edited section text must be 20000 characters or fewer.", status=400)
+    return value, None
 
 
 @require_POST
@@ -713,6 +839,8 @@ def outcome_create(request, patient_id: str):
     patient, error = _clinical_patient_or_error(request, patient_id)
     if error:
         return error
+    if not organization_has_feature(patient.organization, "outcome_measures"):
+        return api_error("Outcome measures are not enabled for this organization. Contact your administrator.", status=403)
     payload, error = _payload_or_error(request)
     if error:
         return error
@@ -760,6 +888,37 @@ def outcome_create(request, patient_id: str):
         },
         status=201,
     )
+
+
+@require_POST
+@api_login_required
+def outcome_assignment_create(request, patient_id: str):
+    """Ask a patient to self-complete one outcome measure through the
+    portal. Only the five self-report measures apply here — TUG/BERG
+    require in-clinic administration and stay staff-entered via
+    outcome_create above."""
+    patient, error = _clinical_patient_or_error(request, patient_id)
+    if error:
+        return error
+    if not organization_has_feature(patient.organization, "outcome_measures"):
+        return api_error("Outcome measures are not enabled for this organization. Contact your administrator.", status=403)
+    payload, error = _payload_or_error(request)
+    if error:
+        return error
+    measure = payload.get("measure")
+    if measure not in PATIENT_SELF_REPORT_MEASURES:
+        return api_error("Choose a measure the patient can complete themselves.", status=400)
+    if not patient.portal_user_id:
+        return api_error("This patient does not have an active portal account yet.", status=409)
+    assignment = OutcomeAssignment(patient=patient, measure=measure, assigned_by=request.user)
+    error_response = _save_or_error(assignment)
+    if error_response:
+        return error_response
+    record_audit_event(
+        actor=request.user, action="outcome_assignment.created", obj=assignment, patient=patient, request=request,
+        metadata={"measure": measure},
+    )
+    return JsonResponse({"assignment": serialize_outcome_assignment(assignment)}, status=201)
 
 
 @require_POST
@@ -875,6 +1034,8 @@ def home_program_create(request, patient_id: str):
     patient, error = _clinical_patient_or_error(request, patient_id)
     if error:
         return error
+    if not organization_has_feature(patient.organization, "hep"):
+        return api_error("Home exercise programs are not enabled for this organization. Contact your administrator.", status=403)
     payload, error = _payload_or_error(request)
     if error:
         return error
@@ -937,6 +1098,105 @@ def home_program_approve(request, program_id: str):
         request=request,
     )
     return JsonResponse({"homeProgram": serialize_home_program(program)})
+
+
+def _apply_exercise_payload(exercise: HomeExercise, payload: dict, *, partial: bool) -> JsonResponse | None:
+    if "name" in payload or not partial:
+        name, error = _required_text(payload, "name", "Exercise name", limit=160)
+        if error:
+            return error
+        exercise.name = name
+    if "instructions" in payload or not partial:
+        instructions, error = _required_text(payload, "instructions", "Instructions", limit=50000)
+        if error:
+            return error
+        exercise.instructions = instructions
+    if "dosage" in payload or not partial:
+        dosage, error = _required_text(payload, "dosage", "Dosage (e.g. 3x10)", limit=120)
+        if error:
+            return error
+        exercise.dosage = dosage
+    if "precautionNote" in payload:
+        exercise.precaution_note = str(payload.get("precautionNote") or "").strip()[:5000]
+    if "videoUrl" in payload:
+        exercise.video_url = str(payload.get("videoUrl") or "").strip()[:200]
+    if "sortOrder" in payload:
+        try:
+            exercise.sort_order = int(payload["sortOrder"])
+        except (TypeError, ValueError):
+            return api_error("sortOrder must be a whole number.", status=400)
+    return None
+
+
+@require_POST
+@api_login_required
+def home_exercise_create(request, program_id: str):
+    program, error = _program_or_error(request, program_id)
+    if error:
+        return error
+    payload, error = _payload_or_error(request)
+    if error:
+        return error
+    exercise = HomeExercise(home_program=program)
+    error_response = _apply_exercise_payload(exercise, payload, partial=False)
+    if error_response:
+        return error_response
+    error_response = _save_or_error(exercise)
+    if error_response:
+        return error_response
+    record_audit_event(
+        actor=request.user, action="home_exercise.created", obj=exercise, patient=program.patient, request=request,
+        metadata={"home_program_id": str(program.pk)},
+    )
+    return JsonResponse({"exercise": serialize_home_exercise(exercise)}, status=201)
+
+
+@require_http_methods(["PATCH"])
+@api_login_required
+def home_exercise_update(request, program_id: str, exercise_id: str):
+    program, error = _program_or_error(request, program_id)
+    if error:
+        return error
+    exercise = program.exercises.filter(pk=exercise_id).first()
+    if exercise is None:
+        return api_error("Exercise was not found.", status=404)
+    payload, error = _payload_or_error(request)
+    if error:
+        return error
+    error_response = _apply_exercise_payload(exercise, payload, partial=True)
+    if error_response:
+        return error_response
+    error_response = _save_or_error(exercise)
+    if error_response:
+        return error_response
+    record_audit_event(
+        actor=request.user, action="home_exercise.updated", obj=exercise, patient=program.patient, request=request,
+        metadata={"home_program_id": str(program.pk)},
+    )
+    return JsonResponse({"exercise": serialize_home_exercise(exercise)})
+
+
+@require_GET
+@api_login_required
+def form_submission_detail(request, patient_id: str, submission_id: str):
+    """Staff read of one patient-submitted digital form (full schema +
+    answers) — the workspace list only carries status, matching
+    serialize_intake's existing "answers are not needed for lists" pattern."""
+    patient, error = _operations_patient_or_error(request, patient_id)
+    if error:
+        return error
+    try:
+        require_role(request.user, SCHEDULING_ROLES)
+    except PermissionDenied as error:
+        return api_error(str(error), status=403)
+    submission = FormSubmission.objects.select_related("template").filter(pk=submission_id, patient=patient).first()
+    if submission is None:
+        return api_error("This form submission was not found.", status=404)
+    record_audit_event(
+        actor=request.user, action="form.viewed", obj=submission, patient=patient, request=request,
+        metadata={"template": submission.template.slug},
+    )
+    return JsonResponse({"submission": serialize_form_submission_detail(submission)})
 
 
 @require_POST
@@ -1034,6 +1294,123 @@ def consent_create(request, patient_id: str):
     return JsonResponse({"consent": serialize_consent(consent)}, status=201)
 
 
+@require_http_methods(["GET", "POST"])
+@api_login_required
+def episodes_of_care(request, patient_id: str):
+    patient, error = _clinical_patient_or_error(request, patient_id)
+    if error:
+        return error
+
+    if request.method == "GET":
+        rows = patient.episodes_of_care.select_related("primary_therapist").all()[:24]
+        return JsonResponse({"episodesOfCare": [serialize_episode_of_care(row) for row in rows]})
+
+    payload, error = _payload_or_error(request)
+    if error:
+        return error
+    diagnosis, error = _optional_text(payload, "diagnosis", limit=240)
+    if error:
+        return error
+    notes, error = _optional_text(payload, "notes", limit=2000)
+    if error:
+        return error
+    status = payload.get("status", EpisodeOfCare.Status.ACTIVE)
+    if status not in EpisodeOfCare.Status.values:
+        return api_error("Choose a supported episode status.", status=400)
+    primary_therapist = None
+    therapist_id = payload.get("primaryTherapistId")
+    if therapist_id:
+        primary_therapist = User.objects.filter(pk=therapist_id, organization=patient.organization).first()
+        if not primary_therapist:
+            return api_error("Choose a therapist from this organization.", status=400)
+    episode = EpisodeOfCare(
+        organization=patient.organization,
+        patient=patient,
+        primary_therapist=primary_therapist,
+        diagnosis=diagnosis,
+        status=status,
+        start_date=payload.get("startDate") or timezone.localdate(),
+        notes=notes,
+        created_by=request.user,
+    )
+    error_response = _save_or_error(episode)
+    if error_response:
+        return error_response
+    record_audit_event(
+        actor=request.user,
+        action="episode_of_care.created",
+        obj=episode,
+        patient=patient,
+        request=request,
+        metadata={"status": status},
+    )
+    return JsonResponse({"episodeOfCare": serialize_episode_of_care(episode)}, status=201)
+
+
+@require_http_methods(["GET", "POST"])
+@api_login_required
+def authorizations(request, patient_id: str):
+    patient, error = _operations_patient_or_error(request, patient_id)
+    if error:
+        return error
+    try:
+        require_role(request.user, BILLING_ROLES)
+    except PermissionDenied as error:
+        return api_error(str(error), status=403)
+
+    if request.method == "GET":
+        rows = patient.authorizations.all()[:24]
+        return JsonResponse({"authorizations": [serialize_authorization(row) for row in rows]})
+
+    payload, error = _payload_or_error(request)
+    if error:
+        return error
+    insurance_name, error = _optional_text(payload, "insuranceName", limit=160)
+    if error:
+        return error
+    authorization_number, error = _optional_text(payload, "authorizationNumber", limit=80)
+    if error:
+        return error
+    notes, error = _optional_text(payload, "notes", limit=2000)
+    if error:
+        return error
+    status = payload.get("status", Authorization.Status.PENDING)
+    if status not in Authorization.Status.values:
+        return api_error("Choose a supported authorization status.", status=400)
+    episode_of_care = None
+    episode_id = payload.get("episodeOfCareId")
+    if episode_id:
+        episode_of_care = patient.episodes_of_care.filter(pk=episode_id).first()
+        if episode_of_care is None:
+            return api_error("Episode of care was not found for this patient.", status=404)
+    authorization = Authorization(
+        organization=patient.organization,
+        patient=patient,
+        episode_of_care=episode_of_care,
+        insurance_name=insurance_name,
+        authorization_number=authorization_number,
+        visits_approved=payload.get("visitsApproved"),
+        visits_used=payload.get("visitsUsed", 0),
+        start_date=payload.get("startDate") or timezone.localdate(),
+        expires_at=payload.get("expiresAt"),
+        status=status,
+        notes=notes,
+        created_by=request.user,
+    )
+    error_response = _save_or_error(authorization)
+    if error_response:
+        return error_response
+    record_audit_event(
+        actor=request.user,
+        action="authorization.created",
+        obj=authorization,
+        patient=patient,
+        request=request,
+        metadata={"status": status, "visits_approved": authorization.visits_approved},
+    )
+    return JsonResponse({"authorization": serialize_authorization(authorization)}, status=201)
+
+
 @require_POST
 @api_login_required
 def referral_create(request, patient_id: str):
@@ -1044,6 +1421,8 @@ def referral_create(request, patient_id: str):
         require_role(request.user, SCHEDULING_ROLES)
     except PermissionDenied as error:
         return api_error(str(error), status=403)
+    if not organization_has_feature(patient.organization, "crm"):
+        return api_error("Referral tracking is not enabled for this organization. Contact your administrator.", status=403)
     payload, error = _payload_or_error(request)
     if error:
         return error
@@ -1140,10 +1519,14 @@ def secure_message_create(request, patient_id: str):
     body, error = _required_text(payload, "body", "Message", limit=50000)
     if error:
         return error
+    category = payload.get("category") or SecureMessage.Category.GENERAL
+    if category not in SecureMessage.Category.values:
+        return api_error("Choose a valid message category.", status=400)
     message = SecureMessage(
         patient=patient,
         sender=request.user,
         recipient=recipient,
+        category=category,
         subject=subject,
         body=body,
     )
@@ -1156,8 +1539,9 @@ def secure_message_create(request, patient_id: str):
         obj=message,
         patient=patient,
         request=request,
-        metadata={"recipient_id": str(recipient.pk)},
+        metadata={"recipient_id": str(recipient.pk), "category": category},
     )
+    send_secure_message_notification_email(recipient, patient.organization)
     return JsonResponse({"message": serialize_message(message, viewer=request.user)}, status=201)
 
 
@@ -1171,6 +1555,8 @@ def superbill_create(request, patient_id: str):
         require_role(request.user, BILLING_ROLES)
     except PermissionDenied as error:
         return api_error(str(error), status=403)
+    if not organization_has_feature(patient.organization, "billing"):
+        return api_error("Billing is not enabled for this organization. Contact your administrator.", status=403)
     payload, error = _payload_or_error(request)
     if error:
         return error
@@ -1311,6 +1697,18 @@ def appointment_create(request, patient_id: str):
     is_home_visit = payload.get("isHomeVisit", False)
     if not isinstance(is_home_visit, bool):
         return api_error("isHomeVisit must be true or false.", status=400)
+    episode_of_care = None
+    episode_id = payload.get("episodeOfCareId")
+    if episode_id:
+        episode_of_care = patient.episodes_of_care.filter(pk=episode_id).first()
+        if episode_of_care is None:
+            return api_error("Episode of care was not found for this patient.", status=404)
+    authorization = None
+    authorization_id = payload.get("authorizationId")
+    if authorization_id:
+        authorization = patient.authorizations.filter(pk=authorization_id).first()
+        if authorization is None:
+            return api_error("Authorization was not found for this patient.", status=404)
     with transaction.atomic():
         has_conflict = (
             Appointment.objects.select_for_update()
@@ -1330,6 +1728,8 @@ def appointment_create(request, patient_id: str):
             ends_at=ends_at,
             location=location,
             is_home_visit=is_home_visit,
+            episode_of_care=episode_of_care,
+            authorization=authorization,
             created_by=request.user,
         )
         error_response = _save_or_error(appointment)

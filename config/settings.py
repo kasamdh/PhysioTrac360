@@ -187,6 +187,14 @@ PLAN_OF_CARE_WARNING_DAYS = [
     int(days) for days in os.getenv("PLAN_OF_CARE_WARNING_DAYS", "30,14,7").split(",") if days.strip()
 ]
 
+# Insurance authorization expiration: same day-count-threshold pattern as
+# PLAN_OF_CARE_WARNING_DAYS, for Authorization.date_alert_tier. Separate from
+# the visit-count thresholds (5/3/1 remaining), which are fixed in code —
+# see Authorization.visit_alert_tier in care/models.py.
+AUTHORIZATION_WARNING_DAYS = [
+    int(days) for days in os.getenv("AUTHORIZATION_WARNING_DAYS", "30,14,7").split(",") if days.strip()
+]
+
 # Maximum concurrent active sessions per role. A role not listed here (e.g. a
 # future role) is unlimited by omission rather than silently blocked.
 SESSION_LIMITS_BY_ROLE = {

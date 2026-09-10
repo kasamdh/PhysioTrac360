@@ -30,6 +30,41 @@ def serialize_user_license(license) -> dict:
     }
 
 
+def serialize_feature(feature) -> dict:
+    return {"code": feature.code, "name": feature.name, "description": feature.description}
+
+
+def serialize_plan(plan) -> dict:
+    return {
+        "code": plan.code,
+        "name": plan.name,
+        "description": plan.description,
+        "monthlyPrice": str(plan.monthly_price),
+        "annualPrice": str(plan.annual_price),
+        "providerSeatLimit": plan.provider_seat_limit,
+        "featureCodes": list(plan.features.values_list("code", flat=True)),
+    }
+
+
+def serialize_org_subscription(subscription) -> dict | None:
+    if subscription is None:
+        return None
+    return {
+        "id": str(subscription.pk),
+        "planCode": subscription.plan.code,
+        "planName": subscription.plan.name,
+        "status": subscription.status,
+        "statusLabel": subscription.get_status_display(),
+        "billingCycle": subscription.billing_cycle,
+        "billingCycleLabel": subscription.get_billing_cycle_display(),
+        "startsAt": subscription.starts_at.isoformat(),
+        "endsAt": subscription.ends_at.isoformat() if subscription.ends_at else None,
+        "providerSeatCount": subscription.provider_seat_count,
+        "featureCodes": list(subscription.features.values_list("code", flat=True)),
+        "isActive": subscription.is_active,
+    }
+
+
 def serialize_user(user) -> dict:
     organization = user.organization
     return {
@@ -52,6 +87,7 @@ def serialize_user(user) -> dict:
         ),
         "capabilities": {
             "isSuperAdmin": user.is_platform_super_admin,
+            "isPatient": user.role == user.Role.PATIENT,
             "canAccessClinical": user.can_access_clinical,
             "canManageSchedule": user.can_manage_schedule,
             "canSignNotes": user.can_sign_notes,
@@ -78,7 +114,9 @@ def serialize_user(user) -> dict:
     }
 
 
-def serialize_patient(patient, *, include_clinical: bool = False, include_contact: bool = False) -> dict:
+def serialize_patient(
+    patient, *, include_clinical: bool = False, include_contact: bool = False, include_portal_status: bool = False
+) -> dict:
     """`include_contact` is opt-in and deliberately narrow: the day-to-day clinical
     workspace and patient list must NOT surface phone/email/address by default
     (minimum-necessary). Only the create/update/edit-form endpoints, which exist
@@ -116,6 +154,14 @@ def serialize_patient(patient, *, include_clinical: bool = False, include_contac
                 "precautions": patient.precautions,
             }
         )
+    if include_portal_status:
+        if patient.portal_user_id is None:
+            portal_status = "none"
+        elif patient.portal_user.has_usable_password():
+            portal_status = "active"
+        else:
+            portal_status = "invited"
+        payload["portalStatus"] = portal_status
     return payload
 
 
@@ -133,6 +179,9 @@ def serialize_appointment(appointment) -> dict:
         "kindLabel": appointment.get_kind_display(),
         "location": appointment.location,
         "isHomeVisit": appointment.is_home_visit,
+        "confirmedAt": appointment.confirmed_at.isoformat() if appointment.confirmed_at else None,
+        "episodeOfCareId": str(appointment.episode_of_care_id) if appointment.episode_of_care_id else None,
+        "authorizationId": str(appointment.authorization_id) if appointment.authorization_id else None,
         "patient": {
             "id": str(appointment.patient_id),
             "fullName": appointment.patient.full_name,
@@ -159,6 +208,7 @@ def serialize_note_summary(note) -> dict:
         "therapistId": str(note.therapist_id),
         "therapistName": _display_name(note.therapist),
         "appointmentId": str(note.appointment_id) if note.appointment_id else None,
+        "episodeOfCareId": str(note.episode_of_care_id) if note.episode_of_care_id else None,
         "cosignRequired": note.cosign_required,
     }
 
@@ -183,6 +233,8 @@ def serialize_intervention(item) -> dict:
         "isTimed": item.is_timed,
         "patientResponse": item.patient_response,
         "order": item.order,
+        "category": item.category,
+        "categoryLabel": item.get_category_display(),
     }
 
 
@@ -277,6 +329,19 @@ def serialize_outcome_trend(trend: dict) -> dict:
     }
 
 
+def serialize_outcome_assignment(assignment) -> dict:
+    return {
+        "id": str(assignment.pk),
+        "measure": assignment.measure,
+        "measureLabel": assignment.get_measure_display(),
+        "status": assignment.status,
+        "statusLabel": assignment.get_status_display(),
+        "assignedBy": _display_name(assignment.assigned_by),
+        "assignedAt": assignment.assigned_at.isoformat(),
+        "completedScoreId": str(assignment.completed_score_id) if assignment.completed_score_id else None,
+    }
+
+
 def serialize_artifact(artifact, *, include_draft_text: bool = False) -> dict:
     """Serialize an auditable clinical draft only for chart-authorized callers."""
     payload = {
@@ -299,6 +364,16 @@ def serialize_artifact(artifact, *, include_draft_text: bool = False) -> dict:
         else None,
         "reviewNote": artifact.review_note,
         "appliedNoteId": str(artifact.applied_note_id) if artifact.applied_note_id else None,
+        "sections": [
+            {
+                "key": section["key"],
+                "label": section["label"],
+                "draftText": section["draftText"],
+                "status": section["status"],
+                "reviewedText": section["reviewedText"],
+            }
+            for section in artifact.sections
+        ],
     }
     if include_draft_text:
         payload["draftText"] = artifact.draft_text
@@ -319,16 +394,19 @@ def serialize_home_program(program) -> dict:
         if program.approved_at
         else None,
         "createdAt": timezone.localtime(program.created_at).isoformat(),
-        "exercises": [
-            {
-                "id": str(exercise.pk),
-                "name": exercise.name,
-                "instructions": exercise.instructions,
-                "dosage": exercise.dosage,
-                "precautionNote": exercise.precaution_note,
-            }
-            for exercise in program.exercises.all()
-        ],
+        "exercises": [serialize_home_exercise(exercise) for exercise in program.exercises.all()],
+    }
+
+
+def serialize_home_exercise(exercise) -> dict:
+    return {
+        "id": str(exercise.pk),
+        "name": exercise.name,
+        "instructions": exercise.instructions,
+        "dosage": exercise.dosage,
+        "precautionNote": exercise.precaution_note,
+        "videoUrl": exercise.video_url,
+        "sortOrder": exercise.sort_order,
     }
 
 
@@ -363,6 +441,44 @@ def serialize_referral(referral) -> dict:
     }
 
 
+def serialize_episode_of_care(episode) -> dict:
+    return {
+        "id": str(episode.pk),
+        "diagnosis": episode.diagnosis,
+        "status": episode.status,
+        "statusLabel": episode.get_status_display(),
+        "startDate": episode.start_date.isoformat(),
+        "endDate": episode.end_date.isoformat() if episode.end_date else None,
+        "notes": episode.notes,
+        "primaryTherapistName": _display_name(episode.primary_therapist) if episode.primary_therapist else None,
+        "referralId": str(episode.referral_id) if episode.referral_id else None,
+        "createdBy": _display_name(episode.created_by) if episode.created_by else None,
+        "createdAt": timezone.localtime(episode.created_at).isoformat(),
+    }
+
+
+def serialize_authorization(authorization) -> dict:
+    return {
+        "id": str(authorization.pk),
+        "insuranceName": authorization.insurance_name,
+        "authorizationNumber": authorization.authorization_number,
+        "visitsApproved": authorization.visits_approved,
+        "visitsUsed": authorization.visits_used,
+        "visitsRemaining": authorization.visits_remaining,
+        "startDate": authorization.start_date.isoformat(),
+        "expiresAt": authorization.expires_at.isoformat(),
+        "daysRemaining": authorization.days_remaining,
+        "status": authorization.status,
+        "statusLabel": authorization.get_status_display(),
+        "dateAlertTier": authorization.date_alert_tier,
+        "visitAlertTier": authorization.visit_alert_tier,
+        "colorBucket": authorization.overall_color_bucket,
+        "episodeOfCareId": str(authorization.episode_of_care_id) if authorization.episode_of_care_id else None,
+        "notes": authorization.notes,
+        "createdAt": timezone.localtime(authorization.created_at).isoformat(),
+    }
+
+
 def serialize_consent(consent) -> dict:
     return {
         "id": str(consent.pk),
@@ -392,6 +508,30 @@ def serialize_intake(intake) -> dict:
     }
 
 
+def serialize_form_submission_summary(submission) -> dict:
+    """Status only, for the workspace's operations list — matches
+    serialize_intake's shape; full answers are fetched on demand via the
+    dedicated staff detail endpoint, not embedded in every workspace load."""
+    return {
+        "id": str(submission.pk),
+        "templateName": submission.template.name,
+        "category": submission.template.category,
+        "status": submission.status,
+        "statusLabel": submission.get_status_display(),
+        "submittedAt": submission.submitted_at.isoformat() if submission.submitted_at else None,
+        "createdAt": submission.created_at.isoformat(),
+    }
+
+
+def serialize_form_submission_detail(submission) -> dict:
+    payload = serialize_form_submission_summary(submission)
+    payload["schema"] = submission.template.schema
+    payload["data"] = submission.data
+    payload["signatureName"] = submission.signature_name
+    payload["signedAt"] = submission.signed_at.isoformat() if submission.signed_at else None
+    return payload
+
+
 def serialize_message(message, *, viewer) -> dict:
     """Message bodies are returned only for a thread participant."""
     return {
@@ -399,6 +539,8 @@ def serialize_message(message, *, viewer) -> dict:
         "direction": "outbound" if message.sender_id == viewer.pk else "inbound",
         "sender": _display_name(message.sender),
         "recipient": _display_name(message.recipient),
+        "category": message.category,
+        "categoryLabel": message.get_category_display(),
         "subject": message.subject,
         "body": message.body,
         "createdAt": timezone.localtime(message.created_at).isoformat(),

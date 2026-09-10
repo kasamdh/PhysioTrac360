@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { ApiError, api } from "@/api/client";
-import type { NoteDetail, Patient } from "@/api/types";
+import type { EpisodeOfCare, NoteDetail, Patient } from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogFooter, FormRow } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -29,8 +29,26 @@ export function StartDocumentationDialog({ initialPatient, appointmentId, onClos
   const [results, setResults] = useState<Patient[]>([]);
   const [searching, setSearching] = useState(false);
   const [noteType, setNoteType] = useState("evaluation");
+  const [episodes, setEpisodes] = useState<EpisodeOfCare[]>([]);
+  const [episodeOfCareId, setEpisodeOfCareId] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    setEpisodeOfCareId("");
+    if (!patient) {
+      setEpisodes([]);
+      return;
+    }
+    let active = true;
+    api
+      .patientEpisodesOfCare(patient.id)
+      .then((result) => active && setEpisodes(result.episodesOfCare))
+      .catch(() => active && setEpisodes([]));
+    return () => {
+      active = false;
+    };
+  }, [patient]);
 
   async function search(value: string) {
     setQuery(value);
@@ -56,6 +74,7 @@ export function StartDocumentationDialog({ initialPatient, appointmentId, onClos
     try {
       const body: Record<string, unknown> = { noteType };
       if (appointmentId) body.appointmentId = appointmentId;
+      if (episodeOfCareId) body.episodeOfCareId = episodeOfCareId;
       const result = await api.createNote(patient.id, body);
       onCreated(result.note);
     } catch (requestError) {
@@ -106,6 +125,17 @@ export function StartDocumentationDialog({ initialPatient, appointmentId, onClos
           ))}
         </Select>
       </FormRow>
+
+      {episodes.length > 0 && (
+        <FormRow label="Episode of Care (optional)" htmlFor="start-doc-episode">
+          <Select id="start-doc-episode" value={episodeOfCareId} onChange={(e) => setEpisodeOfCareId(e.target.value)}>
+            <option value="">Not linked</option>
+            {episodes.map((episode) => (
+              <option key={episode.id} value={episode.id}>{episode.diagnosis || "Episode of care"} · {episode.statusLabel}</option>
+            ))}
+          </Select>
+        </FormRow>
+      )}
 
       {error && (
         <p role="alert" className="mt-3 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">

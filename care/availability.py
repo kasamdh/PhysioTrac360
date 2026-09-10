@@ -58,9 +58,19 @@ def _duration_minutes(provider: Provider, appointment_type) -> tuple[int, int, i
 
 
 def get_provider_slots(
-    *, provider: Provider, location: Location, appointment_type, on_date: date_cls, config: BookingConfiguration
+    *,
+    provider: Provider,
+    location: Location,
+    appointment_type,
+    on_date: date_cls,
+    config: BookingConfiguration,
+    exclude_appointment_id=None,
 ) -> list[Slot]:
-    """All bookable slots for one provider, at one location, on one calendar date."""
+    """All bookable slots for one provider, at one location, on one calendar date.
+
+    `exclude_appointment_id`, when given, leaves that one appointment out of
+    the busy set — used when re-browsing slots to reschedule an existing
+    appointment so its own current time doesn't block a nearby new one."""
     duration_minutes, buffer_before, buffer_after = _duration_minutes(provider, appointment_type)
     total_span = timedelta(minutes=duration_minutes + buffer_before + buffer_after)
     interval = timedelta(minutes=config.slot_interval_minutes)
@@ -94,6 +104,8 @@ def get_provider_slots(
         starts_at__lt=day_end,
         ends_at__gt=day_start,
     ).exclude(status=Appointment.Status.CANCELLED).exclude(status=Appointment.Status.NO_SHOW):
+        if exclude_appointment_id is not None and str(appt.pk) == str(exclude_appointment_id):
+            continue
         busy.append((appt.starts_at, appt.ends_at))
 
     for off in ProviderTimeOff.objects.filter(
@@ -154,6 +166,7 @@ def get_available_slots(
     appointment_type,
     on_date: date_cls,
     provider: Provider | None = None,
+    exclude_appointment_id=None,
 ) -> list[ProviderSlots]:
     """Slots for one specific provider, or aggregated across every eligible
     provider when provider is None ("Any Available Therapist")."""
@@ -171,7 +184,12 @@ def get_available_slots(
     results = []
     for candidate in providers:
         slots = get_provider_slots(
-            provider=candidate, location=location, appointment_type=appointment_type, on_date=on_date, config=config
+            provider=candidate,
+            location=location,
+            appointment_type=appointment_type,
+            on_date=on_date,
+            config=config,
+            exclude_appointment_id=exclude_appointment_id,
         )
         if slots:
             results.append(ProviderSlots(provider=candidate, slots=slots))

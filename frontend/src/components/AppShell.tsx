@@ -4,7 +4,7 @@ import type { WorkspaceUser } from "../api/types";
 import { AppFooter } from "./AppFooter";
 import { HomeTopBar } from "./HomeTopBar";
 
-export type WorkspacePage = "dashboard" | "schedule" | "patients" | "documentation" | "safety" | "clients" | "users" | "clinic-settings" | "reports" | "admin-hub";
+export type WorkspacePage = "dashboard" | "schedule" | "patients" | "documentation" | "safety" | "clients" | "users" | "clinic-settings" | "reports" | "admin-hub" | "credentials";
 
 interface AppShellProps {
   user: WorkspaceUser;
@@ -25,6 +25,7 @@ const PAGE_LABELS: Record<WorkspacePage, string> = {
   reports: "Reports",
   clients: "Clients",
   "admin-hub": "Administration",
+  credentials: "Credentials",
 };
 
 export function AppShell({ user, page, onNavigate, onLogout, children }: AppShellProps) {

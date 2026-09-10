@@ -8,6 +8,7 @@ from .models import (
     AuditEvent,
     ClinicalNote,
     Consent,
+    EpisodeOfCare,
     FunctionalGoal,
     HomeExercise,
     HomeProgram,
@@ -111,6 +112,7 @@ class AuditEventAdmin(admin.ModelAdmin):
 admin.site.register(
     [
         Consent,
+        EpisodeOfCare,
         IntakeSubmission,
         NoteAddendum,
         FunctionalGoal,

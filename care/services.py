@@ -14,7 +14,7 @@ from typing import Iterable
 from django.db.models import QuerySet
 from django.utils import timezone
 
-from .models import AIArtifact, AuditEvent, ClinicalNote, Organization, OutcomeScore, Patient
+from .models import AIArtifact, AuditEvent, ClinicalNote, NoteIntervention, Organization, OutcomeScore, Patient
 
 
 OUTCOME_MEASURES = {
@@ -246,6 +246,120 @@ def patient_compliance_findings(patient: Patient) -> list[ComplianceFinding]:
     return findings
 
 
+# Standard AMA CPT codes for timed PT interventions, keyed by
+# NoteIntervention.Category. Deliberately excludes PATIENT_EDUCATION and
+# OTHER — no single code reliably applies to either without payer-specific
+# review, so those minutes are surfaced as documented-but-uncoded rather
+# than mapped to a guessed code.
+CPT_CODE_BY_CATEGORY = {
+    NoteIntervention.Category.THERAPEUTIC_EXERCISE: ("97110", "Therapeutic Exercise"),
+    NoteIntervention.Category.MANUAL_THERAPY: ("97140", "Manual Therapy"),
+    NoteIntervention.Category.THERAPEUTIC_ACTIVITY: ("97530", "Therapeutic Activity"),
+    NoteIntervention.Category.NEUROMUSCULAR_REEDUCATION: ("97112", "Neuromuscular Re-education"),
+    NoteIntervention.Category.GAIT_TRAINING: ("97116", "Gait Training"),
+    NoteIntervention.Category.SELF_CARE: ("97535", "Self-Care / Home Management Training"),
+}
+_UNCODED_CATEGORIES = {NoteIntervention.Category.PATIENT_EDUCATION, NoteIntervention.Category.OTHER}
+
+
+def _medicare_eight_minute_units(total_timed_minutes: int) -> int:
+    """Standard CMS 8-minute-rule lookup: total timed minutes -> billable
+    units (8-22=1, 23-37=2, 38-52=3, 53-67=4, +1 per additional 15 minutes).
+    Not every payer follows this exact table — the caller must label this a
+    suggestion, never submit it directly."""
+    if total_timed_minutes < 8:
+        return 0
+    return 1 + (total_timed_minutes - 8) // 15
+
+
+def coding_suggestions(note: ClinicalNote) -> dict:
+    """Deterministic, rule-based CPT-unit and documentation-gap suggestions
+    from what is already documented on this note — never infers a diagnosis
+    or a code from free text, matching this module's no-fabrication rule.
+    Every result must be shown as 'Suggested — provider/billing review
+    required' and never submitted automatically."""
+    items = list(note.intervention_items.all())
+
+    minutes_by_category: dict[str, int] = {}
+    for item in items:
+        if item.is_timed and item.category:
+            minutes_by_category[item.category] = minutes_by_category.get(item.category, 0) + item.minutes
+
+    cpt_suggestions = []
+    for category, minutes in minutes_by_category.items():
+        mapping = CPT_CODE_BY_CATEGORY.get(category)
+        if not mapping or minutes <= 0:
+            continue
+        code, label = mapping
+        cpt_suggestions.append(
+            {
+                "code": code,
+                "label": label,
+                "category": category,
+                "minutes": minutes,
+                "suggestedUnits": _medicare_eight_minute_units(minutes),
+            }
+        )
+    cpt_suggestions.sort(key=lambda row: row["minutes"], reverse=True)
+
+    total_timed_minutes = sum(row["minutes"] for row in cpt_suggestions)
+    uncategorized_minutes = sum(item.minutes for item in items if item.is_timed and not item.category)
+    uncoded_labels = sorted({item.get_category_display() for item in items if item.category in _UNCODED_CATEGORIES})
+
+    gaps = []
+    if not items:
+        gaps.append("No treatment interventions are documented on this note.")
+    if uncategorized_minutes:
+        gaps.append(
+            f"{uncategorized_minutes} timed minute(s) have no intervention category and were excluded from coding suggestions."
+        )
+    if uncoded_labels:
+        gaps.append(f"Documented but not independently coded: {', '.join(uncoded_labels)}.")
+    if not note.patient.diagnoses.strip():
+        gaps.append("No diagnosis is on file for this patient — a treatment diagnosis supports medical necessity.")
+    if not note.assessment.strip():
+        gaps.append("No assessment / medical-necessity narrative is documented on this note.")
+
+    return {
+        "cptSuggestions": cpt_suggestions,
+        "totalTimedMinutes": total_timed_minutes,
+        "totalSuggestedUnits": _medicare_eight_minute_units(total_timed_minutes) if cpt_suggestions else 0,
+        "documentationGaps": gaps,
+        "disclaimer": (
+            "Suggested — provider and billing review required. Based only on documented intervention "
+            "minutes and the standard CMS 8-minute rule; confirm against the specific payer's billing "
+            "policy before submitting a claim. Not submitted automatically."
+        ),
+    }
+
+
+def format_coding_draft_text(note: ClinicalNote, suggestion: dict) -> str:
+    """Render `coding_suggestions()` output as the artifact's stored draft_text,
+    matching the narrative-report style of every other AIArtifact kind."""
+    code_lines = [
+        "- %s (%s): %s timed minute(s) -> %s suggested unit(s)"
+        % (row["code"], row["label"], row["minutes"], row["suggestedUnits"])
+        for row in suggestion["cptSuggestions"]
+    ]
+    gap_lines = [f"- {gap}" for gap in suggestion["documentationGaps"]]
+    return (
+        "Coding suggestion draft\n\n"
+        "Source note: %s (%s)\n\n"
+        "Suggested CPT codes (8-minute rule):\n%s\n\n"
+        "Total timed minutes: %s | Total suggested units: %s\n\n"
+        "Documentation gaps:\n%s\n\n"
+        "%s"
+    ) % (
+        note.service_date.isoformat(),
+        note.get_note_type_display(),
+        "\n".join(code_lines) if code_lines else "- No codeable timed interventions are documented.",
+        suggestion["totalTimedMinutes"],
+        suggestion["totalSuggestedUnits"],
+        "\n".join(gap_lines) if gap_lines else "- None identified.",
+        suggestion["disclaimer"],
+    )
+
+
 def goal_suggestions(
     functional_limitation: str, diagnosis: str = "", measure: str = ""
 ) -> list[dict]:
@@ -407,10 +521,46 @@ def compose_draft(patient: Patient, kind: str) -> dict:
         if outcome_lines
         else "- No recorded outcome-measure trends.",
     )
+    sections = [
+        {
+            "key": "priorEvidence",
+            "label": "Prior Signed Visit Evidence",
+            "draftText": "\n".join("- " + line for line in source_lines) if source_lines else "No signed prior visits available.",
+            "status": AIArtifact.SectionStatus.PENDING,
+            "reviewedText": "",
+        },
+        {
+            "key": "activeGoals",
+            "label": "Active Goals",
+            "draftText": "\n".join("- " + line for line in goal_lines) if goal_lines else "No active goals.",
+            "status": AIArtifact.SectionStatus.PENDING,
+            "reviewedText": "",
+        },
+        {
+            "key": "outcomeTrends",
+            "label": "Outcome Trends",
+            "draftText": "\n".join("- " + line for line in outcome_lines) if outcome_lines else "No recorded outcome-measure trends.",
+            "status": AIArtifact.SectionStatus.PENDING,
+            "reviewedText": "",
+        },
+        {
+            "key": "synthesisGuidance",
+            "label": "Therapist Synthesis (write this section yourself)",
+            "draftText": (
+                "Requested sections: %s\n\nDocument only findings supported by the evidence above. "
+                "State missing information explicitly, reconcile precautions, and set an "
+                "individualized plan. This section is guidance only — it is never auto-written."
+            ) % requested_sections,
+            "status": AIArtifact.SectionStatus.PENDING,
+            "reviewedText": "",
+        },
+    ]
+
     return {
         "draft_text": draft,
         "source_note_ids": [str(note.pk) for note in notes],
         "source_fingerprint": _source_fingerprint(notes),
+        "sections": sections,
     }
 
 

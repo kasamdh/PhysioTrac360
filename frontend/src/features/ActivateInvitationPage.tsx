@@ -72,7 +72,7 @@ export function ActivateInvitationPage({ token, onActivated }: ActivateInvitatio
           </div>
           <div className="login-visual-content">
             <p className="eyebrow">Account setup</p>
-            <h2>You've been invited as this organization's administrator.</h2>
+            <h2>You've been invited to set up your account.</h2>
             <p>Choose a password to activate your account. This link can only be used once.</p>
           </div>
         </div>

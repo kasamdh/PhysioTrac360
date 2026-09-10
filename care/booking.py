@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
-from django.utils.dateparse import parse_datetime
+from django.utils.dateparse import parse_date, parse_datetime
 
 from .availability import get_provider_slots
 from .models import (
@@ -28,6 +28,7 @@ from .models import (
     Organization,
     Patient,
     Provider,
+    Waitlist,
 )
 from .services import record_audit_event
 
@@ -60,6 +61,14 @@ class SlotNoLongerAvailableError(BookingError):
 
     def __init__(self):
         super().__init__("This appointment time was just booked. Please select another available time.")
+
+
+class ChangeCutoffError(BookingError):
+    code = "CHANGE_CUTOFF"
+    status = 409
+
+    def __init__(self):
+        super().__init__("This appointment is too close to reschedule or cancel online. Please call the clinic.")
 
 
 @dataclass
@@ -230,3 +239,305 @@ def create_public_booking(request: BookingRequest, *, django_request=None) -> Ap
         },
     )
     return appointment
+
+
+# --- Patient portal: booking, reschedule, cancel, confirm -------------------
+#
+# Same re-validation discipline as the public path above — the frontend's
+# slot search is a preview only — but scoped to an already-known, already-
+# authenticated `Patient` (resolved by the caller via
+# care/access.py:require_portal_patient, never from this module) instead of
+# finding-or-creating one, and gated by `allow_returning_patients` rather
+# than the new/returning-patient split public booking uses.
+
+
+def _resolve_portal_booking_config(organization: Organization) -> BookingConfiguration:
+    config, _ = BookingConfiguration.objects.get_or_create(organization=organization)
+    if not config.online_booking_enabled:
+        raise NotFoundError("Online scheduling is not currently available for this organization.")
+    if not config.allow_returning_patients:
+        raise NotFoundError("Online scheduling is not currently available for existing patients.")
+    return config
+
+
+@transaction.atomic
+def create_portal_booking(
+    patient: Patient,
+    *,
+    location_id: str,
+    appointment_type_id: str,
+    provider_id: str,
+    start_datetime: str,
+    reason_for_visit: str = "",
+    django_request=None,
+) -> Appointment:
+    organization = patient.organization
+    config = _resolve_portal_booking_config(organization)
+    location = _resolve_location(organization, location_id)
+    appointment_type = _resolve_appointment_type(organization, appointment_type_id)
+    if appointment_type.requires_new_patient:
+        raise ValidationFailedError("This appointment type is only available for new patients.")
+    provider = _resolve_provider(organization, location, appointment_type, provider_id)
+
+    # Lock the provider row for the remainder of this transaction — same
+    # double-booking defense as create_public_booking above.
+    provider = Provider.objects.select_for_update().get(pk=provider.pk)
+
+    start_datetime_value = parse_datetime(start_datetime)
+    if start_datetime_value is None:
+        raise ValidationFailedError("Choose a valid appointment time.", field="startDatetime")
+    if timezone.is_naive(start_datetime_value):
+        start_datetime_value = timezone.make_aware(start_datetime_value, ZoneInfo(location.timezone))
+
+    local_date = timezone.localtime(start_datetime_value, ZoneInfo(location.timezone)).date()
+    available_slots = get_provider_slots(
+        provider=provider, location=location, appointment_type=appointment_type, on_date=local_date, config=config
+    )
+    matching_slot = next((slot for slot in available_slots if slot.start == start_datetime_value), None)
+    if matching_slot is None:
+        raise SlotNoLongerAvailableError()
+
+    appointment = Appointment(
+        patient=patient,
+        therapist=provider.user,
+        provider=provider,
+        location_detail=location,
+        appointment_type=appointment_type,
+        kind=appointment_type.default_kind or Appointment.Kind.FOLLOW_UP,
+        status=Appointment.Status.SCHEDULED,
+        starts_at=matching_slot.start,
+        ends_at=matching_slot.end,
+        is_home_visit=False,
+        reason_for_visit=str(reason_for_visit or "")[:240],
+        booking_source=Appointment.BookingSource.PATIENT_PORTAL,
+        created_by=patient.portal_user,
+    )
+    try:
+        appointment.full_clean()
+        appointment.save()
+    except ValidationError as exc:
+        errors = "; ".join(msg for messages in exc.message_dict.values() for msg in messages)
+        raise ValidationFailedError(errors)
+
+    record_audit_event(
+        actor=patient.portal_user,
+        action="appointment.created",
+        obj=appointment,
+        patient=patient,
+        request=django_request,
+        metadata={
+            "booking_source": "patient_portal",
+            "appointment_type": appointment_type.name,
+            "location": location.name,
+        },
+    )
+    return appointment
+
+
+def _assert_within_patient_change_window(appointment: Appointment, config: BookingConfiguration) -> None:
+    if appointment.starts_at - timezone.now() < timedelta(hours=config.patient_change_cutoff_hours):
+        raise ChangeCutoffError()
+
+
+@transaction.atomic
+def cancel_portal_appointment(patient: Patient, appointment_id: str, *, django_request=None) -> Appointment:
+    config, _ = BookingConfiguration.objects.get_or_create(organization=patient.organization)
+    appointment = (
+        Appointment.objects.select_for_update()
+        .select_related("therapist")
+        .filter(pk=appointment_id, patient=patient)
+        .first()
+    )
+    if appointment is None:
+        raise NotFoundError("Appointment not found.")
+    if appointment.status != Appointment.Status.SCHEDULED:
+        raise ValidationFailedError("Only scheduled appointments can be cancelled.")
+    _assert_within_patient_change_window(appointment, config)
+
+    appointment.status = Appointment.Status.CANCELLED
+    appointment.full_clean()
+    appointment.save(update_fields=["status", "updated_at"])
+    record_audit_event(
+        actor=patient.portal_user,
+        action="appointment.cancelled",
+        obj=appointment,
+        patient=patient,
+        request=django_request,
+        metadata={"source": "patient_portal"},
+    )
+    return appointment
+
+
+@transaction.atomic
+def reschedule_portal_appointment(
+    patient: Patient, appointment_id: str, *, start_datetime: str, django_request=None
+) -> Appointment:
+    config, _ = BookingConfiguration.objects.get_or_create(organization=patient.organization)
+    # No select_related here: several of these FKs are nullable (SET_NULL),
+    # and PostgreSQL rejects SELECT ... FOR UPDATE across an outer join.
+    # Related objects are fetched separately below once locked.
+    appointment = Appointment.objects.select_for_update().filter(pk=appointment_id, patient=patient).first()
+    if appointment is None:
+        raise NotFoundError("Appointment not found.")
+    if appointment.status != Appointment.Status.SCHEDULED:
+        raise ValidationFailedError("Only scheduled appointments can be rescheduled.")
+    _assert_within_patient_change_window(appointment, config)
+    if not appointment.provider_id or not appointment.location_detail_id or not appointment.appointment_type_id:
+        raise ValidationFailedError("This appointment cannot be rescheduled online. Please call the clinic.")
+
+    # Lock the provider row for the remainder of this transaction — same
+    # double-booking defense as create_portal_booking above.
+    provider = Provider.objects.select_for_update().get(pk=appointment.provider_id)
+
+    start_datetime_value = parse_datetime(start_datetime)
+    if start_datetime_value is None:
+        raise ValidationFailedError("Choose a valid appointment time.", field="startDatetime")
+    location = appointment.location_detail
+    if timezone.is_naive(start_datetime_value):
+        start_datetime_value = timezone.make_aware(start_datetime_value, ZoneInfo(location.timezone))
+
+    local_date = timezone.localtime(start_datetime_value, ZoneInfo(location.timezone)).date()
+    available_slots = get_provider_slots(
+        provider=provider,
+        location=location,
+        appointment_type=appointment.appointment_type,
+        on_date=local_date,
+        config=config,
+        exclude_appointment_id=appointment.pk,
+    )
+    matching_slot = next((slot for slot in available_slots if slot.start == start_datetime_value), None)
+    if matching_slot is None:
+        raise SlotNoLongerAvailableError()
+
+    appointment.starts_at = matching_slot.start
+    appointment.ends_at = matching_slot.end
+    appointment.confirmed_at = None
+    try:
+        appointment.full_clean()
+        appointment.save(update_fields=["starts_at", "ends_at", "confirmed_at", "updated_at"])
+    except ValidationError as exc:
+        errors = "; ".join(msg for messages in exc.message_dict.values() for msg in messages)
+        raise ValidationFailedError(errors)
+
+    record_audit_event(
+        actor=patient.portal_user,
+        action="appointment.rescheduled",
+        obj=appointment,
+        patient=patient,
+        request=django_request,
+        metadata={"source": "patient_portal"},
+    )
+    return appointment
+
+
+@transaction.atomic
+def confirm_portal_appointment(patient: Patient, appointment_id: str, *, django_request=None) -> Appointment:
+    appointment = (
+        Appointment.objects.select_for_update().filter(pk=appointment_id, patient=patient).first()
+    )
+    if appointment is None:
+        raise NotFoundError("Appointment not found.")
+    if appointment.status != Appointment.Status.SCHEDULED:
+        raise ValidationFailedError("Only scheduled appointments can be confirmed.")
+    if appointment.confirmed_at is None:
+        appointment.confirmed_at = timezone.now()
+        appointment.save(update_fields=["confirmed_at", "updated_at"])
+        record_audit_event(
+            actor=patient.portal_user,
+            action="appointment.confirmed",
+            obj=appointment,
+            patient=patient,
+            request=django_request,
+            metadata={"source": "patient_portal"},
+        )
+    return appointment
+
+
+# --- Patient portal: waitlist ------------------------------------------------
+
+
+def join_portal_waitlist(
+    patient: Patient,
+    *,
+    location_id: str = "",
+    appointment_type_id: str = "",
+    provider_id: str = "",
+    earliest_date: str,
+    latest_date: str = "",
+    notes: str = "",
+    django_request=None,
+) -> Waitlist:
+    organization = patient.organization
+    location = None
+    if location_id:
+        location = Location.objects.filter(pk=location_id, organization=organization, is_active=True).first()
+        if not location:
+            raise NotFoundError("This location is not available.")
+    appointment_type = None
+    if appointment_type_id:
+        appointment_type = AppointmentType.objects.filter(
+            pk=appointment_type_id, organization=organization, is_active=True
+        ).first()
+        if not appointment_type:
+            raise NotFoundError("This appointment type is not available.")
+    provider = None
+    if provider_id:
+        provider = Provider.objects.filter(pk=provider_id, organization=organization, is_active=True).first()
+        if not provider:
+            raise NotFoundError("This provider is not available.")
+
+    earliest = parse_date(earliest_date) if earliest_date else None
+    if not earliest:
+        raise ValidationFailedError("Choose a valid earliest date.", field="earliestDate")
+    latest = None
+    if latest_date:
+        latest = parse_date(latest_date)
+        if not latest:
+            raise ValidationFailedError("Choose a valid latest date.", field="latestDate")
+
+    # Idempotent join: re-submitting the same preferences while already
+    # active just returns the existing entry rather than duplicating it.
+    existing = Waitlist.objects.filter(
+        patient=patient,
+        status=Waitlist.Status.ACTIVE,
+        location=location,
+        appointment_type=appointment_type,
+        provider=provider,
+    ).first()
+    if existing:
+        return existing
+
+    entry = Waitlist(
+        organization=organization,
+        patient=patient,
+        location=location,
+        appointment_type=appointment_type,
+        provider=provider,
+        earliest_date=earliest,
+        latest_date=latest,
+        notes=str(notes or "")[:240],
+    )
+    try:
+        entry.full_clean()
+        entry.save()
+    except ValidationError as exc:
+        errors = "; ".join(msg for messages in exc.message_dict.values() for msg in messages)
+        raise ValidationFailedError(errors)
+
+    record_audit_event(
+        actor=patient.portal_user, action="waitlist.joined", obj=entry, patient=patient, request=django_request
+    )
+    return entry
+
+
+def leave_portal_waitlist(patient: Patient, entry_id: str, *, django_request=None) -> Waitlist:
+    entry = Waitlist.objects.filter(pk=entry_id, patient=patient).first()
+    if entry is None:
+        raise NotFoundError("Waitlist entry not found.")
+    if entry.status == Waitlist.Status.ACTIVE:
+        entry.status = Waitlist.Status.CANCELLED
+        entry.save(update_fields=["status", "updated_at"])
+        record_audit_event(
+            actor=patient.portal_user, action="waitlist.left", obj=entry, patient=patient, request=django_request
+        )
+    return entry

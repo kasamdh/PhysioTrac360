@@ -5,6 +5,7 @@ import type { Patient, WorkspaceUser } from "../api/types";
 import { formatDate } from "../lib/format";
 import { PatientFormDialog } from "./PatientFormDialog";
 import { PatientWorkspace } from "./PatientWorkspace";
+import { ProfileChangeRequestsPanel } from "./ProfileChangeRequestsPanel";
 
 interface PatientsPageProps {
   user: WorkspaceUser;
@@ -48,6 +49,7 @@ export function PatientsPage({ user }: PatientsPageProps) {
         <div><p className="eyebrow">Patient workspaces</p><h1>Patients</h1><p>Search is limited to your organization and role scope. Each workspace returns only the panels your role is allowed to access.</p></div>
         {user.capabilities.canManageSchedule && <button className="primary-button" onClick={() => setShowCreate(true)}>+ New patient</button>}
       </header>
+      {user.capabilities.canAccessClinical && <ProfileChangeRequestsPanel />}
       <section className="surface-card">
         <form className="search-form" onSubmit={submitSearch}>
           <label className="sr-only" htmlFor="patient-search">Search patients</label>

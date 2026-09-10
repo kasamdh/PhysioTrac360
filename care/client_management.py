@@ -27,20 +27,25 @@ def invitation_activation_url(organization: Organization, token: str) -> str:
     return f"{settings.FRONTEND_BASE_URL}/{organization.slug}/activate?token={token}"
 
 
-def issue_invitation(organization: Organization, administrator: User) -> str:
+def issue_invitation(organization: Organization, user: User, *, email_sender=send_client_admin_invitation_email) -> str:
     """Issue one fresh invitation (invalidating older unused ones) and email
-    the activation link to the administrator."""
+    the activation link to `user`. `activate_invitation` (the consuming
+    view) is role-agnostic, so this same token/ClientInvitation mechanism
+    works for any role — only the notification copy differs, hence the
+    pluggable `email_sender` (defaults to the original admin-invite copy so
+    every existing caller is unaffected; care/portal_management.py passes a
+    patient-flavored one)."""
     token = token_urlsafe(32)
-    ClientInvitation.objects.filter(user=administrator, used_at__isnull=True).update(
+    ClientInvitation.objects.filter(user=user, used_at__isnull=True).update(
         used_at=timezone.now()
     )
     ClientInvitation.objects.create(
         organization=organization,
-        user=administrator,
+        user=user,
         token_hash=sha256(token.encode()).hexdigest(),
         expires_at=timezone.now() + timedelta(days=7),
     )
-    send_client_admin_invitation_email(administrator, organization, invitation_activation_url(organization, token))
+    email_sender(user, organization, invitation_activation_url(organization, token))
     return token
 
 

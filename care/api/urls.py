@@ -1,7 +1,7 @@
 from django.urls import path
 
 from .. import views as legacy_views
-from . import admin_config, documents, note_views, public_booking, user_licenses, views, workflow_views, super_admin
+from . import admin_config, billing, documents, note_views, patient_portal, public_booking, user_licenses, views, workflow_views, super_admin
 
 
 urlpatterns = [
@@ -45,6 +45,105 @@ urlpatterns = [
     path("staff/", views.staff_options, name="api-staff-options"),
     path("locations/", admin_config.locations, name="api-locations"),
     path("locations/<uuid:location_id>/", admin_config.location_detail, name="api-location-detail"),
+    path("payers/", billing.payers, name="api-payers"),
+    path("payers/<uuid:payer_id>/", billing.payer_detail, name="api-payer-detail"),
+    path("patients/<uuid:patient_id>/insurance/", billing.patient_insurance_policies, name="api-patient-insurance"),
+    path(
+        "patients/<uuid:patient_id>/insurance/<uuid:policy_id>/",
+        billing.patient_insurance_detail,
+        name="api-patient-insurance-detail",
+    ),
+    path(
+        "patients/<uuid:patient_id>/insurance/<uuid:policy_id>/card/<str:side>/upload/",
+        billing.patient_insurance_card_upload,
+        name="api-patient-insurance-card-upload",
+    ),
+    path(
+        "patients/<uuid:patient_id>/insurance/<uuid:policy_id>/card/<str:side>/",
+        billing.patient_insurance_card_download,
+        name="api-patient-insurance-card-download",
+    ),
+    path(
+        "patients/<uuid:patient_id>/insurance/<uuid:policy_id>/verify-eligibility/",
+        billing.patient_insurance_verify_eligibility,
+        name="api-patient-insurance-verify-eligibility",
+    ),
+    path("patients/<uuid:patient_id>/transactions/", billing.patient_transactions, name="api-patient-transactions"),
+    path(
+        "patients/<uuid:patient_id>/transactions/<uuid:transaction_id>/match/",
+        billing.transaction_match,
+        name="api-transaction-match",
+    ),
+    path("reports/ar-aging/", billing.ar_aging_report, name="api-ar-aging-report"),
+    path("reports/billing-summary/", billing.billing_summary_report, name="api-billing-summary-report"),
+    path("reports/denials/", billing.denial_work_queue, name="api-denial-work-queue"),
+    path(
+        "patients/<uuid:patient_id>/claims/<uuid:claim_id>/denials/",
+        billing.claim_denials,
+        name="api-claim-denials",
+    ),
+    path("patients/<uuid:patient_id>/denials/<uuid:denial_id>/", billing.denial_detail, name="api-denial-detail"),
+    path("patients/<uuid:patient_id>/statements/", billing.patient_statements, name="api-patient-statements"),
+    path(
+        "patients/<uuid:patient_id>/statements/<uuid:statement_id>/",
+        billing.statement_detail,
+        name="api-statement-detail",
+    ),
+    path("service-prices/", billing.service_prices, name="api-service-prices"),
+    path("service-prices/<uuid:price_id>/", billing.service_price_detail, name="api-service-price-detail"),
+    path(
+        "patients/<uuid:patient_id>/cash-packages/",
+        billing.patient_cash_packages,
+        name="api-patient-cash-packages",
+    ),
+    path(
+        "patients/<uuid:patient_id>/cash-packages/<uuid:package_id>/",
+        billing.cash_package_detail,
+        name="api-cash-package-detail",
+    ),
+    path(
+        "patients/<uuid:patient_id>/superbills/<uuid:superbill_id>/data/",
+        billing.superbill_data,
+        name="api-superbill-data",
+    ),
+    path("diagnosis-codes/", billing.diagnosis_codes, name="api-diagnosis-codes"),
+    path("patients/<uuid:patient_id>/charges/", billing.patient_charges, name="api-patient-charges"),
+    path(
+        "patients/<uuid:patient_id>/charges/<uuid:charge_id>/",
+        billing.patient_charge_detail,
+        name="api-patient-charge-detail",
+    ),
+    path("patients/<uuid:patient_id>/claims/", billing.patient_claims, name="api-patient-claims"),
+    path(
+        "patients/<uuid:patient_id>/claims/<uuid:claim_id>/",
+        billing.patient_claim_detail,
+        name="api-patient-claim-detail",
+    ),
+    path(
+        "patients/<uuid:patient_id>/claims/<uuid:claim_id>/validate/",
+        billing.claim_validate,
+        name="api-claim-validate",
+    ),
+    path(
+        "patients/<uuid:patient_id>/claims/<uuid:claim_id>/submit/",
+        billing.claim_submit,
+        name="api-claim-submit",
+    ),
+    path(
+        "patients/<uuid:patient_id>/claims/<uuid:claim_id>/check-status/",
+        billing.claim_check_status,
+        name="api-claim-check-status",
+    ),
+    path(
+        "patients/<uuid:patient_id>/claims/<uuid:claim_id>/status/",
+        billing.claim_status_update,
+        name="api-claim-status-update",
+    ),
+    path(
+        "patients/<uuid:patient_id>/claims/<uuid:claim_id>/cms1500/",
+        billing.claim_cms1500,
+        name="api-claim-cms1500",
+    ),
     path("appointment-types/", admin_config.appointment_types, name="api-appointment-types"),
     path("appointment-types/<uuid:appointment_type_id>/", admin_config.appointment_type_detail, name="api-appointment-type-detail"),
     path("reports/operations/", admin_config.operational_report, name="api-operational-report"),
@@ -52,9 +151,142 @@ urlpatterns = [
     path("patients/<uuid:patient_id>/edit/", views.patient_for_edit, name="api-patient-for-edit"),
     path("patients/<uuid:patient_id>/documents/", documents.patient_documents, name="api-patient-documents"),
     path(
+        "patients/<uuid:patient_id>/portal-invite/",
+        patient_portal.portal_invite_create,
+        name="api-patient-portal-invite",
+    ),
+    path("portal/dashboard/", patient_portal.portal_dashboard, name="api-portal-dashboard"),
+    path("portal/appointments/", patient_portal.portal_appointments_list, name="api-portal-appointments"),
+    path(
+        "portal/appointments/<uuid:appointment_id>/cancel/",
+        patient_portal.portal_appointment_cancel,
+        name="api-portal-appointment-cancel",
+    ),
+    path(
+        "portal/appointments/<uuid:appointment_id>/reschedule/",
+        patient_portal.portal_appointment_reschedule,
+        name="api-portal-appointment-reschedule",
+    ),
+    path(
+        "portal/appointments/<uuid:appointment_id>/confirm/",
+        patient_portal.portal_appointment_confirm,
+        name="api-portal-appointment-confirm",
+    ),
+    path(
+        "portal/appointments/<uuid:appointment_id>/telehealth/join/",
+        patient_portal.portal_appointment_telehealth_join,
+        name="api-portal-appointment-telehealth-join",
+    ),
+    path("portal/booking/locations/", patient_portal.portal_booking_locations, name="api-portal-booking-locations"),
+    path(
+        "portal/booking/appointment-types/",
+        patient_portal.portal_booking_appointment_types,
+        name="api-portal-booking-appointment-types",
+    ),
+    path("portal/booking/providers/", patient_portal.portal_booking_providers, name="api-portal-booking-providers"),
+    path("portal/booking/availability/", patient_portal.portal_booking_availability, name="api-portal-booking-availability"),
+    path("portal/booking/", patient_portal.portal_booking_create, name="api-portal-booking-create"),
+    path("portal/waitlist/", patient_portal.portal_waitlist, name="api-portal-waitlist"),
+    path(
+        "portal/waitlist/<uuid:entry_id>/leave/",
+        patient_portal.portal_waitlist_leave,
+        name="api-portal-waitlist-leave",
+    ),
+    path("waitlist/", patient_portal.waitlist_staff_list, name="api-waitlist-staff-list"),
+    path(
+        "waitlist/<uuid:entry_id>/status/",
+        patient_portal.waitlist_staff_update_status,
+        name="api-waitlist-staff-update-status",
+    ),
+    path("portal/forms/", patient_portal.portal_forms_list, name="api-portal-forms-list"),
+    path("portal/forms/<slug:template_slug>/", patient_portal.portal_form_detail, name="api-portal-form-detail"),
+    path("portal/forms/<slug:template_slug>/save/", patient_portal.portal_form_save, name="api-portal-form-save"),
+    path("portal/forms/<slug:template_slug>/submit/", patient_portal.portal_form_submit, name="api-portal-form-submit"),
+    path("portal/insurance/payers/", patient_portal.portal_insurance_payers, name="api-portal-insurance-payers"),
+    path("portal/insurance/", patient_portal.portal_insurance, name="api-portal-insurance"),
+    path(
+        "portal/insurance/<uuid:policy_id>/card/<str:side>/",
+        patient_portal.portal_insurance_card_upload,
+        name="api-portal-insurance-card-upload",
+    ),
+    path(
+        "portal/insurance/<uuid:policy_id>/card/<str:side>/download/",
+        patient_portal.portal_insurance_card_download,
+        name="api-portal-insurance-card-download",
+    ),
+    path("portal/documents/", patient_portal.portal_documents, name="api-portal-documents"),
+    path(
+        "portal/documents/<uuid:document_id>/download/",
+        patient_portal.portal_document_download,
+        name="api-portal-document-download",
+    ),
+    path("portal/hep/", patient_portal.portal_hep, name="api-portal-hep"),
+    path("portal/hep/logs/", patient_portal.portal_hep_logs, name="api-portal-hep-logs"),
+    path(
+        "portal/hep/exercises/<uuid:exercise_id>/complete/",
+        patient_portal.portal_hep_complete,
+        name="api-portal-hep-complete",
+    ),
+    path("portal/outcomes/", patient_portal.portal_outcomes_list, name="api-portal-outcomes-list"),
+    path(
+        "portal/outcomes/<uuid:assignment_id>/",
+        patient_portal.portal_outcome_detail,
+        name="api-portal-outcome-detail",
+    ),
+    path(
+        "portal/outcomes/<uuid:assignment_id>/submit/",
+        patient_portal.portal_outcome_submit,
+        name="api-portal-outcome-submit",
+    ),
+    path("portal/messages/", patient_portal.portal_messages, name="api-portal-messages"),
+    path(
+        "portal/messages/<uuid:message_id>/read/",
+        patient_portal.portal_message_mark_read,
+        name="api-portal-message-read",
+    ),
+    path("portal/payments/", patient_portal.portal_payments, name="api-portal-payments"),
+    path(
+        "portal/payments/statements/<uuid:statement_id>/",
+        patient_portal.portal_statement_detail,
+        name="api-portal-statement-detail",
+    ),
+    path("portal/payments/charge/", patient_portal.portal_payment_charge, name="api-portal-payment-charge"),
+    path("portal/superbills/", patient_portal.portal_superbills, name="api-portal-superbills"),
+    path(
+        "portal/superbills/<uuid:superbill_id>/",
+        patient_portal.portal_superbill_detail,
+        name="api-portal-superbill-detail",
+    ),
+    path("portal/profile/", patient_portal.portal_profile, name="api-portal-profile"),
+    path(
+        "portal/profile/preferences/",
+        patient_portal.portal_profile_preferences,
+        name="api-portal-profile-preferences",
+    ),
+    path(
+        "portal/profile/change-requests/",
+        patient_portal.portal_profile_change_request_create,
+        name="api-portal-profile-change-request-create",
+    ),
+    path(
+        "profile-change-requests/",
+        patient_portal.profile_change_requests_staff_list,
+        name="api-profile-change-requests-staff-list",
+    ),
+    path(
+        "profile-change-requests/<uuid:request_id>/decide/",
+        patient_portal.profile_change_request_staff_decide,
+        name="api-profile-change-request-staff-decide",
+    ),
+    path(
         "patients/<uuid:patient_id>/documents/<uuid:document_id>/download/",
         documents.patient_document_download,
         name="api-patient-document-download",
+    ),
+    path(
+        "patients/<uuid:patient_id>/documents/<uuid:document_id>/visibility/",
+        documents.patient_document_visibility,
+        name="api-patient-document-visibility",
     ),
     path(
         "patients/<uuid:patient_id>/workspace/",
@@ -78,6 +310,11 @@ urlpatterns = [
         name="api-note-interventions-replace",
     ),
     path(
+        "notes/<uuid:note_id>/coding-suggestions/",
+        note_views.coding_suggestions_create,
+        name="api-note-coding-suggestions-create",
+    ),
+    path(
         "patients/<uuid:patient_id>/drafts/",
         workflow_views.draft_create,
         name="api-draft-create",
@@ -94,6 +331,11 @@ urlpatterns = [
         "patients/<uuid:patient_id>/outcomes/",
         workflow_views.outcome_create,
         name="api-outcome-create",
+    ),
+    path(
+        "patients/<uuid:patient_id>/outcome-assignments/",
+        workflow_views.outcome_assignment_create,
+        name="api-outcome-assignment-create",
     ),
     path(
         "patients/<uuid:patient_id>/voice-captures/",
@@ -121,14 +363,39 @@ urlpatterns = [
         name="api-home-program-approve",
     ),
     path(
+        "home-programs/<uuid:program_id>/exercises/",
+        workflow_views.home_exercise_create,
+        name="api-home-exercise-create",
+    ),
+    path(
+        "home-programs/<uuid:program_id>/exercises/<uuid:exercise_id>/",
+        workflow_views.home_exercise_update,
+        name="api-home-exercise-update",
+    ),
+    path(
         "patients/<uuid:patient_id>/intakes/",
         workflow_views.intake_create,
         name="api-intake-create",
     ),
     path(
+        "patients/<uuid:patient_id>/forms/<uuid:submission_id>/",
+        workflow_views.form_submission_detail,
+        name="api-form-submission-detail",
+    ),
+    path(
         "patients/<uuid:patient_id>/consents/",
         workflow_views.consent_create,
         name="api-consent-create",
+    ),
+    path(
+        "patients/<uuid:patient_id>/episodes/",
+        workflow_views.episodes_of_care,
+        name="api-episode-of-care-create",
+    ),
+    path(
+        "patients/<uuid:patient_id>/authorizations/",
+        workflow_views.authorizations,
+        name="api-authorization-create",
     ),
     path(
         "patients/<uuid:patient_id>/referrals/",
@@ -167,6 +434,11 @@ urlpatterns = [
         name="api-appointment-move",
     ),
     path("audit-events/", workflow_views.audit_events, name="api-audit-events"),
+    path("super-admin/dashboard/", super_admin.dashboard, name="api-super-admin-dashboard"),
+    path("super-admin/credentials/", super_admin.credential_dashboard, name="api-super-admin-credentials"),
+    path("super-admin/features/", super_admin.features, name="api-super-admin-features"),
+    path("super-admin/plans/", super_admin.plans, name="api-super-admin-plans"),
+    path("super-admin/clients/<int:client_number>/subscription/", super_admin.client_subscription, name="api-super-admin-client-subscription"),
     path("super-admin/clients/", super_admin.clients, name="api-super-admin-clients"),
     path("super-admin/users/", super_admin.all_users, name="api-super-admin-users"),
     path("super-admin/users/<uuid:user_id>/", super_admin.user_detail, name="api-super-admin-user-detail"),

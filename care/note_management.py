@@ -13,9 +13,10 @@ in exactly one place.
 from __future__ import annotations
 
 from django.core.exceptions import ValidationError
+from django.db import transaction
 from django.utils import timezone
 
-from .models import Appointment, ClinicalNote, NoteAddendum, User
+from .models import Appointment, Authorization, ClinicalNote, NoteAddendum, User
 from .services import note_compliance_findings, record_audit_event
 
 FINALIZING_ROLES = {User.Role.ADMIN, User.Role.DIRECTOR}
@@ -24,14 +25,24 @@ FINALIZING_ROLES = {User.Role.ADMIN, User.Role.DIRECTOR}
 def _complete_linked_appointment(note: ClinicalNote) -> None:
     """A signed note closes the loop on its appointment, matching how
     scheduling already treats a completed encounter — never overrides a
-    cancellation or no-show, since those reflect what actually happened."""
+    cancellation or no-show, since those reflect what actually happened.
+    Wraps its own transaction (callers — sign_note/cosign_note — don't open
+    one) so the authorization row-lock below is always valid, matching every
+    other concurrency-sensitive counter update in this codebase (booking.py's
+    provider lock, user_management.py's status transitions)."""
     appointment = note.appointment
     if appointment is None:
         return
     if appointment.status not in {Appointment.Status.SCHEDULED, Appointment.Status.CHECKED_IN}:
         return
-    appointment.status = Appointment.Status.COMPLETED
-    appointment.save(update_fields=["status", "updated_at"])
+    with transaction.atomic():
+        appointment.status = Appointment.Status.COMPLETED
+        appointment.save(update_fields=["status", "updated_at"])
+        if appointment.authorization_id:
+            authorization = Authorization.objects.select_for_update().get(pk=appointment.authorization_id)
+            if authorization.visits_used < authorization.visits_approved:
+                authorization.visits_used += 1
+                authorization.save(update_fields=["visits_used", "updated_at"])
 
 
 def can_view_note(user, note: ClinicalNote) -> bool:

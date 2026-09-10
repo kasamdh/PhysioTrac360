@@ -5,7 +5,20 @@ import { ApiError, api } from "@/api/client";
 import type { NoteIntervention } from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeaderRow, TableHeader, TableRow } from "@/components/ui/table";
+
+const INTERVENTION_CATEGORIES: { value: string; label: string }[] = [
+  { value: "", label: "Uncategorized" },
+  { value: "therapeutic_exercise", label: "Therapeutic Exercise" },
+  { value: "manual_therapy", label: "Manual Therapy" },
+  { value: "therapeutic_activity", label: "Therapeutic Activity" },
+  { value: "neuromuscular_reeducation", label: "Neuromuscular Re-education" },
+  { value: "gait_training", label: "Gait Training" },
+  { value: "self_care", label: "Self-care / Home Management" },
+  { value: "patient_education", label: "Patient Education" },
+  { value: "other", label: "Other Intervention" },
+];
 
 type DraftRow = Omit<NoteIntervention, "id"> & { id?: string };
 
@@ -40,7 +53,7 @@ export function InterventionTable({ noteId, items, onSaved, disabled }: Interven
   function addRow() {
     setRows((current) => [
       ...current,
-      { description: "", bodyRegion: "", minutes: 0, units: null, isTimed: true, patientResponse: "", order: current.length },
+      { description: "", bodyRegion: "", minutes: 0, units: null, isTimed: true, patientResponse: "", order: current.length, category: "", categoryLabel: "" },
     ]);
     setDirty(true);
   }
@@ -58,6 +71,7 @@ export function InterventionTable({ noteId, items, onSaved, disabled }: Interven
           units: row.units,
           isTimed: row.isTimed,
           patientResponse: row.patientResponse,
+          category: row.category,
         })),
       );
       setRows(result.interventionItems.map(toDraft));
@@ -82,6 +96,7 @@ export function InterventionTable({ noteId, items, onSaved, disabled }: Interven
           <TableHeaderRow>
             <TableHead>Description</TableHead>
             <TableHead className="w-32">Body Region</TableHead>
+            <TableHead className="w-44">Category</TableHead>
             <TableHead className="w-20">Minutes</TableHead>
             <TableHead className="w-16">Units</TableHead>
             <TableHead className="w-16">Timed</TableHead>
@@ -94,6 +109,13 @@ export function InterventionTable({ noteId, items, onSaved, disabled }: Interven
             <TableRow key={index}>
               <TableCell><Input value={row.description} disabled={disabled} placeholder="Therapeutic exercise" onChange={(e) => updateRow(index, { description: e.target.value })} className="h-9 text-sm" /></TableCell>
               <TableCell><Input value={row.bodyRegion} disabled={disabled} onChange={(e) => updateRow(index, { bodyRegion: e.target.value })} className="h-9 text-sm" /></TableCell>
+              <TableCell>
+                <Select value={row.category} disabled={disabled} onChange={(e) => updateRow(index, { category: e.target.value })} className="h-9 text-sm">
+                  {INTERVENTION_CATEGORIES.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </Select>
+              </TableCell>
               <TableCell><Input type="number" min={0} value={row.minutes} disabled={disabled} onChange={(e) => updateRow(index, { minutes: Number(e.target.value) || 0 })} className="h-9 text-sm" /></TableCell>
               <TableCell><Input type="number" min={0} value={row.units ?? ""} disabled={disabled} onChange={(e) => updateRow(index, { units: e.target.value ? Number(e.target.value) : null })} className="h-9 text-sm" /></TableCell>
               <TableCell><input type="checkbox" checked={row.isTimed} disabled={disabled} onChange={(e) => updateRow(index, { isTimed: e.target.checked })} className="h-4 w-4" /></TableCell>

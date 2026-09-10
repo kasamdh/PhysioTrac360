@@ -4,6 +4,7 @@ import type { CSSProperties } from "react";
 import { ApiError, api } from "../api/client";
 import type { Appointment, Patient, ScheduleData, WorkspaceUser } from "../api/types";
 import { formatDate, formatTime, monthLabel } from "../lib/format";
+import { WaitlistPanel } from "./WaitlistPanel";
 
 type ViewMode = "day" | "week" | "workWeek" | "month";
 
@@ -280,6 +281,8 @@ export function SchedulePage({ user }: { user: WorkspaceUser }) {
 
       {error && <p className="form-error" role="alert">{error}</p>}
       {notice && <p className="form-notice" role="status">{notice}</p>}
+
+      {user.capabilities.canManageSchedule && <WaitlistPanel />}
 
       <section className="surface-card calendar-surface" aria-labelledby="react-calendar-title">
         <header className="card-heading">

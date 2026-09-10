@@ -6,14 +6,15 @@ documentation. A therapist must review and sign any resulting note.
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import date, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 from django.conf import settings
 from django.contrib.auth.models import AbstractUser
 from django.core.exceptions import ValidationError
 from django.core.files.storage import FileSystemStorage
-from django.core.validators import FileExtensionValidator
+from django.core.validators import FileExtensionValidator, RegexValidator
 from django.db import models
 from django.db.models import F, Q
 from django.utils import timezone
@@ -100,6 +101,12 @@ class Organization(UUIDTimeStampedModel):
     )
     support_email = models.EmailField(blank=True)
     support_phone = models.CharField(max_length=32, blank=True)
+    npi_number = models.CharField(
+        max_length=10, blank=True, help_text="Billing-provider (group) NPI — CMS-1500 box 33."
+    )
+    tax_id = models.CharField(
+        max_length=20, blank=True, help_text="Federal tax ID / EIN — CMS-1500 box 25."
+    )
     address = models.TextField(blank=True)
     address_line_1 = models.CharField(max_length=200, blank=True)
     address_line_2 = models.CharField(max_length=200, blank=True)
@@ -483,9 +490,64 @@ class BookingConfiguration(UUIDTimeStampedModel):
     max_advance_days = models.PositiveSmallIntegerField(default=90)
     slot_interval_minutes = models.PositiveSmallIntegerField(default=15)
     cancellation_policy = models.TextField(blank=True)
+    patient_change_cutoff_hours = models.PositiveSmallIntegerField(
+        default=24,
+        help_text="How many hours before an appointment a patient may still cancel or reschedule it online via the portal.",
+    )
 
     def __str__(self) -> str:
         return f"Booking configuration — {self.organization}"
+
+
+class Waitlist(UUIDTimeStampedModel):
+    """A patient's request to be seen sooner than their next confirmed slot —
+    joined from the portal, worked from the staff schedule when an opening
+    appears. Preferences (location/type/provider) are all optional filters;
+    leaving them blank means "any" for that dimension.
+    """
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        FULFILLED = "fulfilled", "Fulfilled"
+        CANCELLED = "cancelled", "Cancelled"
+
+    organization = models.ForeignKey(Organization, on_delete=models.PROTECT, related_name="waitlist_entries")
+    patient = models.ForeignKey("Patient", on_delete=models.PROTECT, related_name="waitlist_entries")
+    location = models.ForeignKey(
+        Location, on_delete=models.SET_NULL, null=True, blank=True, related_name="waitlist_entries"
+    )
+    appointment_type = models.ForeignKey(
+        AppointmentType, on_delete=models.SET_NULL, null=True, blank=True, related_name="waitlist_entries"
+    )
+    provider = models.ForeignKey(
+        Provider, on_delete=models.SET_NULL, null=True, blank=True, related_name="waitlist_entries"
+    )
+    earliest_date = models.DateField()
+    latest_date = models.DateField(null=True, blank=True)
+    notes = models.CharField(max_length=240, blank=True)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.ACTIVE)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["organization", "status"])]
+
+    def clean(self):
+        errors = {}
+        if self.patient_id and self.organization_id and self.patient.organization_id != self.organization_id:
+            errors["patient"] = "Patient must belong to the same organization."
+        if self.location_id and self.organization_id and self.location.organization_id != self.organization_id:
+            errors["location"] = "Location must belong to the same organization."
+        if self.appointment_type_id and self.organization_id and self.appointment_type.organization_id != self.organization_id:
+            errors["appointment_type"] = "Appointment type must belong to the same organization."
+        if self.provider_id and self.organization_id and self.provider.organization_id != self.organization_id:
+            errors["provider"] = "Provider must belong to the same organization."
+        if self.latest_date and self.earliest_date and self.latest_date < self.earliest_date:
+            errors["latest_date"] = "End of range cannot precede the start of the range."
+        if errors:
+            raise ValidationError(errors)
+
+    def __str__(self) -> str:
+        return f"{self.patient} waitlist entry — {self.get_status_display()}"
 
 
 class Feature(UUIDTimeStampedModel):
@@ -792,12 +854,34 @@ class Patient(UUIDTimeStampedModel):
     emergency_contact = models.CharField(max_length=200, blank=True)
     diagnoses = models.TextField(blank=True)
     precautions = models.TextField(blank=True)
+
+    class ContactMethod(models.TextChoices):
+        EMAIL = "email", "Email"
+        PHONE = "phone", "Phone call"
+        SMS = "sms", "Text message"
+
+    pharmacy_name = models.CharField(max_length=160, blank=True)
+    pharmacy_phone = models.CharField(max_length=32, blank=True)
+    pharmacy_address = models.TextField(blank=True)
+    preferred_contact_method = models.CharField(max_length=16, choices=ContactMethod.choices, default=ContactMethod.EMAIL)
+    email_notifications_enabled = models.BooleanField(
+        default=True,
+        help_text="Whether this patient receives the (content-free) 'you have a new secure message' email.",
+    )
     assigned_therapist = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
         related_name="assigned_patients",
+    )
+    portal_user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="patient_profile",
+        help_text="The login identity (role=patient) this chart's portal account uses, if one has been issued.",
     )
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.ACTIVE)
 
@@ -829,6 +913,11 @@ class Patient(UUIDTimeStampedModel):
             raise ValidationError(
                 {"assigned_therapist": "Assigned therapist must belong to this organization."}
             )
+        if self.portal_user_id:
+            if self.portal_user.organization_id != self.organization_id:
+                raise ValidationError({"portal_user": "Portal account must belong to this organization."})
+            if self.portal_user.role != User.Role.PATIENT:
+                raise ValidationError({"portal_user": "Portal account must have the patient role."})
 
     @property
     def _active_plan_of_care_note(self):
@@ -873,6 +962,54 @@ class Patient(UUIDTimeStampedModel):
         return expiry_color_bucket(tier)
 
 
+class PatientProfileChangeRequest(UUIDTimeStampedModel):
+    """A patient's self-submitted request to change sensitive contact
+    fields (phone/email/address/emergency contact) — never applied
+    automatically. Staff review and either approve (which writes `changes`
+    onto the Patient row) or reject; the request row itself is kept either
+    way as a permanent record of what was asked and decided. Lower-risk
+    fields (pharmacy, communication preference) skip this queue entirely
+    and are written directly to Patient — see care/api/patient_portal.py's
+    portal_profile_preferences."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        APPROVED = "approved", "Approved"
+        REJECTED = "rejected", "Rejected"
+
+    ALLOWED_FIELDS = {"phone", "email", "address", "emergency_contact"}
+
+    patient = models.ForeignKey(Patient, on_delete=models.PROTECT, related_name="profile_change_requests")
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="requested_profile_changes"
+    )
+    changes = models.JSONField(default=dict, blank=True, help_text="Proposed {field_name: new_value}, keys restricted to ALLOWED_FIELDS.")
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="reviewed_profile_changes"
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    reviewer_note = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["patient", "status"])]
+
+    def clean(self):
+        errors = {}
+        if self.patient_id and self.requested_by_id and self.patient.portal_user_id != self.requested_by_id:
+            errors["requested_by"] = "Only the patient's own portal account may request changes to their profile."
+        if not isinstance(self.changes, dict) or not self.changes:
+            errors["changes"] = "At least one field change is required."
+        elif not set(self.changes.keys()) <= self.ALLOWED_FIELDS:
+            errors["changes"] = f"Only these fields may be requested: {', '.join(sorted(self.ALLOWED_FIELDS))}."
+        if errors:
+            raise ValidationError(errors)
+
+    def __str__(self) -> str:
+        return f"{self.patient} profile change ({self.get_status_display()})"
+
+
 class Referral(UUIDTimeStampedModel):
     """A referral to or from an outside provider, tracked by front-desk staff."""
 
@@ -902,6 +1039,182 @@ class Referral(UUIDTimeStampedModel):
 
     def __str__(self) -> str:
         return f"{self.get_direction_display()} — {self.provider_name}"
+
+
+class EpisodeOfCare(UUIDTimeStampedModel):
+    """One course of treatment for a patient — groups the appointments and
+    clinical notes belonging to a single referral/diagnosis/plan-of-care
+    cycle. A patient may have multiple episodes over their lifetime (a knee
+    surgery this year, an unrelated shoulder injury next year) and,
+    occasionally, more than one open at once (different body regions under
+    different plans of care). Deliberately optional everywhere it's
+    referenced (Appointment.episode_of_care, ClinicalNote.episode_of_care)
+    — every existing patient/appointment/note predates this model and must
+    keep working with no episode assigned."""
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        ON_HOLD = "on_hold", "On hold"
+        DISCHARGED = "discharged", "Discharged"
+        CANCELLED = "cancelled", "Cancelled"
+
+    organization = models.ForeignKey(Organization, on_delete=models.PROTECT, related_name="episodes_of_care")
+    patient = models.ForeignKey(Patient, on_delete=models.PROTECT, related_name="episodes_of_care")
+    primary_therapist = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="episodes_of_care",
+    )
+    referral = models.ForeignKey(
+        Referral, on_delete=models.SET_NULL, null=True, blank=True, related_name="episodes_of_care"
+    )
+    diagnosis = models.CharField(max_length=240, blank=True)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.ACTIVE)
+    start_date = models.DateField(default=date.today)
+    end_date = models.DateField(null=True, blank=True)
+    notes = models.TextField(blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_episodes_of_care",
+    )
+
+    class Meta:
+        ordering = ["-start_date", "-created_at"]
+        indexes = [models.Index(fields=["organization", "patient", "status"])]
+
+    def clean(self):
+        errors = {}
+        if self.patient_id and self.organization_id and self.patient.organization_id != self.organization_id:
+            errors["patient"] = "Patient must belong to this organization."
+        if (
+            self.primary_therapist_id
+            and self.organization_id
+            and self.primary_therapist.organization_id != self.organization_id
+        ):
+            errors["primary_therapist"] = "Therapist must belong to this organization."
+        if self.referral_id and self.patient_id and self.referral.patient_id != self.patient_id:
+            errors["referral"] = "Referral must belong to the same patient."
+        if self.end_date and self.start_date and self.end_date < self.start_date:
+            errors["end_date"] = "End date cannot precede the start date."
+        if errors:
+            raise ValidationError(errors)
+
+    def __str__(self) -> str:
+        return f"{self.patient} — {self.get_status_display()} ({self.start_date})"
+
+
+class Authorization(UUIDTimeStampedModel):
+    """An insurance authorization for a block of visits. `status` is the
+    staff-controlled workflow state (pending/active/denied/cancelled) —
+    "expired" and "exhausted" are deliberately NOT stored status values,
+    since both are fully derivable from `expires_at`/`visits_used` and
+    storing them risks going stale, matching the same "don't store what's
+    derivable" rule UserLicense.alert_tier and Patient.plan_of_care_alert_tier
+    already follow in this file."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        ACTIVE = "active", "Active"
+        DENIED = "denied", "Denied"
+        CANCELLED = "cancelled", "Cancelled"
+
+    organization = models.ForeignKey(Organization, on_delete=models.PROTECT, related_name="authorizations")
+    patient = models.ForeignKey(Patient, on_delete=models.PROTECT, related_name="authorizations")
+    episode_of_care = models.ForeignKey(
+        EpisodeOfCare, on_delete=models.SET_NULL, null=True, blank=True, related_name="authorizations"
+    )
+    insurance_name = models.CharField(max_length=160, blank=True)
+    authorization_number = models.CharField(max_length=80, blank=True)
+    visits_approved = models.PositiveSmallIntegerField()
+    visits_used = models.PositiveSmallIntegerField(default=0)
+    start_date = models.DateField(default=date.today)
+    expires_at = models.DateField()
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
+    notes = models.TextField(blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_authorizations",
+    )
+
+    class Meta:
+        ordering = ["-start_date", "-created_at"]
+        indexes = [models.Index(fields=["organization", "patient", "status"])]
+
+    def clean(self):
+        errors = {}
+        if self.patient_id and self.organization_id and self.patient.organization_id != self.organization_id:
+            errors["patient"] = "Patient must belong to this organization."
+        if self.episode_of_care_id and self.patient_id and self.episode_of_care.patient_id != self.patient_id:
+            errors["episode_of_care"] = "Episode of care must belong to the same patient."
+        if self.expires_at and self.start_date and self.expires_at < self.start_date:
+            errors["expires_at"] = "Expiration cannot precede the start date."
+        if self.visits_used > self.visits_approved:
+            errors["visits_used"] = "Visits used cannot exceed visits approved."
+        if errors:
+            raise ValidationError(errors)
+
+    @property
+    def visits_remaining(self) -> int:
+        return max(0, self.visits_approved - self.visits_used)
+
+    @property
+    def days_remaining(self) -> int:
+        return (self.expires_at - timezone.localdate()).days
+
+    @property
+    def date_alert_tier(self) -> str:
+        """'expired' | 'critical_N' | 'expiring_N' | 'valid' — same day-based
+        scale as UserLicense.alert_tier / Patient.plan_of_care_alert_tier."""
+        return expiry_alert_tier(self.days_remaining, settings.AUTHORIZATION_WARNING_DAYS)
+
+    @property
+    def date_color_bucket(self) -> str:
+        return expiry_color_bucket(self.date_alert_tier)
+
+    @property
+    def visit_alert_tier(self) -> str:
+        """'exhausted' | 'critical_1' | 'critical_3' | 'warning_5' | 'ok' —
+        the visits-remaining thresholds the product brief asks for (5/3/1/0),
+        a separate dimension from date-based expiry."""
+        remaining = self.visits_remaining
+        if remaining <= 0:
+            return "exhausted"
+        if remaining <= 1:
+            return "critical_1"
+        if remaining <= 3:
+            return "critical_3"
+        if remaining <= 5:
+            return "warning_5"
+        return "ok"
+
+    @property
+    def visit_color_bucket(self) -> str:
+        tier = self.visit_alert_tier
+        if tier == "exhausted":
+            return "expired"
+        if tier.startswith("critical_"):
+            return "critical"
+        if tier.startswith("warning_"):
+            return "expiring_soon"
+        return "valid"
+
+    @property
+    def overall_color_bucket(self) -> str:
+        """The worse of the date-based and visit-based buckets, for a single
+        summary badge."""
+        severity = {"expired": 3, "critical": 2, "expiring_soon": 1, "valid": 0}
+        return max(self.date_color_bucket, self.visit_color_bucket, key=lambda bucket: severity[bucket])
+
+    def __str__(self) -> str:
+        return f"{self.patient} — {self.authorization_number or 'Authorization'} ({self.visits_remaining}/{self.visits_approved} remaining)"
 
 
 class Consent(UUIDTimeStampedModel):
@@ -955,6 +1268,81 @@ class IntakeSubmission(UUIDTimeStampedModel):
     )
 
 
+class FormTemplate(UUIDTimeStampedModel):
+    """A reusable, schema-driven form definition — digital intake, a privacy
+    acknowledgement, or any future assignable form. `schema` is a list of
+    sections, each `{"key", "label", "fields": [{"key", "label", "type",
+    "required"}, ...]}` — deliberately data-driven (not one hardcoded model
+    per form type) so a new form type is a new template row, not a
+    migration. `validity_days` drives the computed "expired" status on
+    FormSubmission (None means a completed submission never expires)."""
+
+    class Category(models.TextChoices):
+        INTAKE = "intake", "Intake"
+        CONSENT = "consent", "Consent"
+        OTHER = "other", "Other"
+
+    organization = models.ForeignKey(Organization, on_delete=models.PROTECT, related_name="form_templates")
+    slug = models.SlugField(max_length=80)
+    name = models.CharField(max_length=160)
+    category = models.CharField(max_length=16, choices=Category.choices, default=Category.OTHER)
+    schema = models.JSONField(default=list, blank=True)
+    validity_days = models.PositiveIntegerField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["name"]
+        constraints = [
+            models.UniqueConstraint(fields=["organization", "slug"], name="unique_form_template_slug_per_org")
+        ]
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class FormSubmission(UUIDTimeStampedModel):
+    """One patient's answers to one FormTemplate. Insert-only once
+    `status == COMPLETED`: a later re-submission (e.g. after expiration)
+    creates a NEW row rather than mutating this one — historical submissions
+    are never overwritten, matching every other audit-relevant record in
+    this codebase."""
+
+    class Status(models.TextChoices):
+        NOT_STARTED = "not_started", "Not started"
+        IN_PROGRESS = "in_progress", "In progress"
+        COMPLETED = "completed", "Completed"
+
+    patient = models.ForeignKey(Patient, on_delete=models.PROTECT, related_name="form_submissions")
+    template = models.ForeignKey(FormTemplate, on_delete=models.PROTECT, related_name="submissions")
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.NOT_STARTED)
+    data = models.JSONField(default=dict, blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    signature_name = models.CharField(max_length=160, blank=True)
+    signed_at = models.DateTimeField(null=True, blank=True)
+    signed_ip = models.GenericIPAddressField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["patient", "template", "-created_at"])]
+
+    def clean(self):
+        if self.patient_id and self.template_id and self.patient.organization_id != self.template.organization_id:
+            raise ValidationError({"template": "Form template must belong to the patient's organization."})
+
+    @property
+    def is_expired(self) -> bool:
+        """A completed submission "ages out" once past the template's
+        validity window — computed live, never stored, same as every other
+        derived-status field in this codebase (e.g. Authorization, Claim)."""
+        if self.status != self.Status.COMPLETED or not self.submitted_at or not self.template.validity_days:
+            return False
+        return timezone.now() > self.submitted_at + timedelta(days=self.template.validity_days)
+
+    def __str__(self) -> str:
+        return f"{self.patient} — {self.template.name} ({self.get_status_display()})"
+
+
 private_document_storage = FileSystemStorage(location=str(settings.PRIVATE_MEDIA_ROOT))
 
 
@@ -986,6 +1374,11 @@ class PatientDocument(UUIDTimeStampedModel):
     title = models.CharField(max_length=200)
     description = models.TextField(blank=True)
     size_bytes = models.PositiveIntegerField(default=0)
+    visible_to_patient = models.BooleanField(
+        default=False,
+        help_text="Off by default for a staff upload — a clinician must explicitly share a document before the "
+        "portal can show it. A patient's own upload through the portal always sets this true at creation.",
+    )
 
     class Meta:
         ordering = ["-created_at"]
@@ -1000,6 +1393,12 @@ def user_license_document_upload_path(instance, filename: str) -> str:
     the original filename is kept separately on the model."""
     extension = Path(filename).suffix.lower()
     return "license_documents/%s/%s%s" % (instance.user_id, uuid.uuid4().hex, extension)
+
+
+def patient_insurance_card_upload_path(instance, filename: str) -> str:
+    """Opaque name under a per-policy folder, mirroring `patient_document_upload_path`."""
+    extension = Path(filename).suffix.lower()
+    return "insurance_cards/%s/%s%s" % (instance.pk or uuid.uuid4().hex, uuid.uuid4().hex, extension)
 
 
 class UserLicense(UUIDTimeStampedModel):
@@ -1141,8 +1540,26 @@ class Appointment(UUIDTimeStampedModel):
         max_length=20, choices=BookingSource.choices, default=BookingSource.FRONT_DESK
     )
     reason_for_visit = models.CharField(max_length=240, blank=True)
+    episode_of_care = models.ForeignKey(
+        EpisodeOfCare,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="appointments",
+    )
+    authorization = models.ForeignKey(
+        Authorization,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="appointments",
+    )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="created_appointments"
+    )
+    confirmed_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text="When the patient confirmed this visit via the portal. Null means unconfirmed.",
     )
 
     class Meta:
@@ -1176,6 +1593,10 @@ class Appointment(UUIDTimeStampedModel):
             errors["provider"] = "Provider does not match the assigned therapist's user profile."
         if self.appointment_type_id and self.patient_id and self.appointment_type.organization_id != self.patient.organization_id:
             errors["appointment_type"] = "Appointment type must belong to the patient's organization."
+        if self.episode_of_care_id and self.patient_id and self.episode_of_care.patient_id != self.patient_id:
+            errors["episode_of_care"] = "Episode of care must belong to the same patient."
+        if self.authorization_id and self.patient_id and self.authorization.patient_id != self.patient_id:
+            errors["authorization"] = "Authorization must belong to the same patient."
         if (
             self.therapist_id
             and self.starts_at
@@ -1231,6 +1652,13 @@ class ClinicalNote(UUIDTimeStampedModel):
         null=True,
         blank=True,
         related_name="clinical_note",
+    )
+    episode_of_care = models.ForeignKey(
+        EpisodeOfCare,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="clinical_notes",
     )
     note_type = models.CharField(max_length=20, choices=Type.choices, default=Type.DAILY)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
@@ -1288,6 +1716,8 @@ class ClinicalNote(UUIDTimeStampedModel):
             self.plan_of_care_end < self.plan_of_care_start
         ):
             errors["plan_of_care_end"] = "Plan-of-care end cannot precede its start."
+        if self.episode_of_care_id and self.patient_id and self.episode_of_care.patient_id != self.patient_id:
+            errors["episode_of_care"] = "Episode of care must belong to the same patient."
         if self.status == self.Status.SIGNED:
             if not self.signature_name:
                 errors["signature_name"] = "A signature is required to finalize a note."
@@ -1343,11 +1773,26 @@ class NoteIntervention(UUIDTimeStampedModel):
     the same shape `NoteAddendum` already is to `ClinicalNote`.
     """
 
+    class Category(models.TextChoices):
+        THERAPEUTIC_EXERCISE = "therapeutic_exercise", "Therapeutic Exercise"
+        MANUAL_THERAPY = "manual_therapy", "Manual Therapy"
+        THERAPEUTIC_ACTIVITY = "therapeutic_activity", "Therapeutic Activity"
+        NEUROMUSCULAR_REEDUCATION = "neuromuscular_reeducation", "Neuromuscular Re-education"
+        GAIT_TRAINING = "gait_training", "Gait Training"
+        SELF_CARE = "self_care", "Self-care / Home Management"
+        PATIENT_EDUCATION = "patient_education", "Patient Education"
+        OTHER = "other", "Other Intervention"
+
     note = models.ForeignKey(
         ClinicalNote, on_delete=models.CASCADE, related_name="intervention_items"
     )
     description = models.CharField(max_length=240)
     body_region = models.CharField(max_length=80, blank=True)
+    # Blank means "not categorized" — deliberately excluded from CPT-code
+    # suggestions (services.coding_suggestions) rather than guessed from the
+    # free-text description, since fuzzy-matching text to a billing code is
+    # exactly the kind of fabrication this app's AI-safety rules forbid.
+    category = models.CharField(max_length=32, choices=Category.choices, blank=True)
     minutes = models.PositiveSmallIntegerField(default=0)
     units = models.PositiveSmallIntegerField(null=True, blank=True)
     is_timed = models.BooleanField(default=True)
@@ -1478,6 +1923,42 @@ class OutcomeScore(UUIDTimeStampedModel):
             raise ValidationError({"score": "Score cannot be negative."})
 
 
+class OutcomeAssignment(UUIDTimeStampedModel):
+    """A therapist's request that a patient complete one specific
+    self-report outcome measure through the portal. Deliberately patient-
+    specific (unlike the org-wide FormTemplate engine) since which measure
+    applies is a clinical judgment — a knee patient gets LEFS, a neck
+    patient gets NDI, not every patient gets every measure. Re-administering
+    the same measure later (standard practice for tracking progress) is a
+    new assignment row, never a re-opened old one — history stays intact."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        COMPLETED = "completed", "Completed"
+
+    patient = models.ForeignKey(Patient, on_delete=models.PROTECT, related_name="outcome_assignments")
+    measure = models.CharField(max_length=20, choices=OutcomeScore.Measure.choices)
+    assigned_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="assigned_outcome_measures"
+    )
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
+    assigned_at = models.DateTimeField(default=timezone.now)
+    completed_score = models.ForeignKey(
+        OutcomeScore, on_delete=models.SET_NULL, null=True, blank=True, related_name="assignment"
+    )
+
+    class Meta:
+        ordering = ["-assigned_at"]
+        indexes = [models.Index(fields=["patient", "status"])]
+
+    def clean(self):
+        if self.patient_id and self.completed_score_id and self.completed_score.patient_id != self.patient_id:
+            raise ValidationError({"completed_score": "Score must belong to the same patient."})
+
+    def __str__(self) -> str:
+        return f"{self.patient} — {self.get_measure_display()} ({self.get_status_display()})"
+
+
 class AIArtifact(UUIDTimeStampedModel):
     """Auditable draft generated from an explicit, permission-checked source set."""
 
@@ -1489,12 +1970,22 @@ class AIArtifact(UUIDTimeStampedModel):
         HEP = "hep", "Home-program suggestion"
         PATIENT_SUMMARY = "patient_summary", "Patient visit summary"
         COMPLIANCE = "compliance", "Compliance check"
+        CODING = "coding", "Coding suggestion"
 
     class Status(models.TextChoices):
         DRAFT = "draft", "Draft — therapist review required"
         APPROVED = "approved", "Approved by therapist"
         REJECTED = "rejected", "Rejected"
         APPLIED = "applied", "Applied to editable note"
+
+    class SectionStatus(models.TextChoices):
+        """Per-section review state stored inside the `sections` JSON list —
+        not a DB column, just a shared vocabulary for services/views/tests."""
+
+        PENDING = "pending", "Pending review"
+        ACCEPTED = "accepted", "Accepted as drafted"
+        EDITED = "edited", "Edited by therapist"
+        REJECTED = "rejected", "Rejected"
 
     patient = models.ForeignKey(Patient, on_delete=models.PROTECT, related_name="ai_artifacts")
     requested_by = models.ForeignKey(
@@ -1507,6 +1998,15 @@ class AIArtifact(UUIDTimeStampedModel):
     provider = models.CharField(max_length=80, default="local-template")
     model_version = models.CharField(max_length=80, default="clinical-draft-v1")
     draft_text = models.TextField()
+    sections = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=(
+            "Optional per-section breakdown of draft_text for granular therapist "
+            "review: [{key, label, draftText, status, reviewedText}, ...]. Empty "
+            "for kinds that are only ever reviewed as a single block."
+        ),
+    )
     safety_notice = models.TextField(
         default="Draft only. A licensed therapist must verify, edit, approve, and sign."
     )
@@ -1566,9 +2066,46 @@ class HomeExercise(UUIDTimeStampedModel):
     dosage = models.CharField(max_length=120)
     precaution_note = models.TextField(blank=True)
     sort_order = models.PositiveSmallIntegerField(default=0)
+    video_url = models.URLField(blank=True, help_text="Link to an instructional video (YouTube, Vimeo, or similar).")
 
     class Meta:
         ordering = ["sort_order", "name"]
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class HomeExerciseLog(UUIDTimeStampedModel):
+    """One patient-reported completion of one exercise — the raw material
+    for adherence tracking. Insert-only: a patient logging the same
+    exercise again (a different day, or a second set later the same day)
+    creates another row rather than editing a prior one, so history is
+    never lost."""
+
+    home_exercise = models.ForeignKey(HomeExercise, on_delete=models.PROTECT, related_name="logs")
+    patient = models.ForeignKey(Patient, on_delete=models.PROTECT, related_name="home_exercise_logs")
+    completed_at = models.DateTimeField(default=timezone.now)
+    pain_level = models.PositiveSmallIntegerField(null=True, blank=True)
+    difficulty_level = models.PositiveSmallIntegerField(null=True, blank=True)
+    comment = models.CharField(max_length=500, blank=True)
+
+    class Meta:
+        ordering = ["-completed_at"]
+        indexes = [models.Index(fields=["patient", "-completed_at"])]
+
+    def clean(self):
+        errors = {}
+        if self.home_exercise_id and self.patient_id and self.home_exercise.home_program.patient_id != self.patient_id:
+            errors["home_exercise"] = "Exercise must belong to this patient's own home program."
+        for field_name in ("pain_level", "difficulty_level"):
+            value = getattr(self, field_name)
+            if value is not None and not (0 <= value <= 10):
+                errors[field_name] = "Enter a value from 0 to 10."
+        if errors:
+            raise ValidationError(errors)
+
+    def __str__(self) -> str:
+        return f"{self.patient} — {self.home_exercise.name} ({self.completed_at.date()})"
 
 
 class VoiceCapture(UUIDTimeStampedModel):
@@ -1604,6 +2141,13 @@ class VoiceCapture(UUIDTimeStampedModel):
 class SecureMessage(UUIDTimeStampedModel):
     """In-app secure message. Notifications must never include its content."""
 
+    class Category(models.TextChoices):
+        GENERAL = "general", "General"
+        APPOINTMENT = "appointment", "Appointment"
+        HEP = "hep", "Home exercise program"
+        BILLING = "billing", "Billing"
+        CLINICAL = "clinical", "Clinical"
+
     patient = models.ForeignKey(Patient, on_delete=models.PROTECT, related_name="messages")
     sender = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="sent_secure_messages"
@@ -1613,6 +2157,7 @@ class SecureMessage(UUIDTimeStampedModel):
         on_delete=models.PROTECT,
         related_name="received_secure_messages",
     )
+    category = models.CharField(max_length=16, choices=Category.choices, default=Category.GENERAL)
     subject = models.CharField(max_length=180)
     body = models.TextField()
     read_at = models.DateTimeField(null=True, blank=True)
@@ -1620,6 +2165,467 @@ class SecureMessage(UUIDTimeStampedModel):
     class Meta:
         ordering = ["-created_at"]
         indexes = [models.Index(fields=["recipient", "read_at"])]
+
+
+class DiagnosisCode(UUIDTimeStampedModel):
+    """Read-only ICD-10-CM reference data, shared across every tenant — the
+    same catalog for everyone, not per-organization data. Maintained only via
+    `seed_diagnosis_codes` (idempotent, get-or-create by code), never edited
+    through the API, exactly like the platform-wide Feature/SubscriptionPlan
+    catalogs in this file."""
+
+    code = models.CharField(max_length=10, unique=True)
+    description = models.CharField(max_length=255)
+    is_billable = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["code"]
+
+    def __str__(self) -> str:
+        return "%s — %s" % (self.code, self.description)
+
+
+class Payer(UUIDTimeStampedModel):
+    """One entry in an organization's configurable insurance-payer directory.
+    Deliberately data-driven (timely filing days, authorization requirement,
+    free-text rules notes) rather than hard-coding any payer's rules into the
+    UI — billing staff maintain this directory themselves."""
+
+    organization = models.ForeignKey(Organization, on_delete=models.PROTECT, related_name="payers")
+    name = models.CharField(max_length=160)
+    payer_id = models.CharField(max_length=40, blank=True)
+    electronic_payer_id = models.CharField(max_length=40, blank=True)
+    address_line_1 = models.CharField(max_length=200, blank=True)
+    address_line_2 = models.CharField(max_length=200, blank=True)
+    city = models.CharField(max_length=120, blank=True)
+    state = models.CharField(max_length=80, blank=True)
+    zip_code = models.CharField(max_length=20, blank=True)
+    phone = models.CharField(max_length=32, blank=True)
+    is_active = models.BooleanField(default=True)
+    timely_filing_days = models.PositiveSmallIntegerField(default=90)
+    authorization_required = models.BooleanField(default=False)
+    authorization_notes = models.TextField(blank=True)
+    notes = models.TextField(blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="created_payers"
+    )
+
+    class Meta:
+        ordering = ["name"]
+        indexes = [models.Index(fields=["organization", "name"])]
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class PatientInsurance(UUIDTimeStampedModel):
+    """One insurance policy on a patient's chart. Multiple rows accumulate
+    over time (terminated policies are kept, never deleted, for billing
+    history) — `is_active` is computed from the effective/termination dates,
+    never stored, matching this app's alert-tier/derivable-status pattern."""
+
+    class Rank(models.TextChoices):
+        PRIMARY = "primary", "Primary"
+        SECONDARY = "secondary", "Secondary"
+        TERTIARY = "tertiary", "Tertiary"
+
+    class Relationship(models.TextChoices):
+        SELF = "self", "Self"
+        SPOUSE = "spouse", "Spouse"
+        CHILD = "child", "Child"
+        OTHER = "other", "Other"
+
+    organization = models.ForeignKey(Organization, on_delete=models.PROTECT, related_name="patient_insurance_policies")
+    patient = models.ForeignKey(Patient, on_delete=models.PROTECT, related_name="insurance_policies")
+    payer = models.ForeignKey(Payer, on_delete=models.PROTECT, related_name="patient_policies")
+    rank = models.CharField(max_length=16, choices=Rank.choices, default=Rank.PRIMARY)
+    plan_name = models.CharField(max_length=160, blank=True)
+    member_id = models.CharField(max_length=80)
+    group_number = models.CharField(max_length=80, blank=True)
+    subscriber_name = models.CharField(max_length=160, blank=True)
+    subscriber_date_of_birth = models.DateField(null=True, blank=True)
+    relationship_to_subscriber = models.CharField(max_length=16, choices=Relationship.choices, default=Relationship.SELF)
+    effective_date = models.DateField()
+    termination_date = models.DateField(null=True, blank=True)
+    copay = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    coinsurance_percent = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    deductible = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    authorization_required = models.BooleanField(default=False)
+    card_front = models.ImageField(
+        upload_to=patient_insurance_card_upload_path,
+        storage=private_document_storage,
+        validators=[FileExtensionValidator(allowed_extensions=["png", "jpg", "jpeg"])],
+        null=True,
+        blank=True,
+    )
+    card_back = models.ImageField(
+        upload_to=patient_insurance_card_upload_path,
+        storage=private_document_storage,
+        validators=[FileExtensionValidator(allowed_extensions=["png", "jpg", "jpeg"])],
+        null=True,
+        blank=True,
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_patient_insurance_policies",
+    )
+
+    class Meta:
+        ordering = ["rank", "-effective_date"]
+        indexes = [models.Index(fields=["organization", "patient", "rank"])]
+
+    def clean(self):
+        if self.patient_id and self.organization_id and self.patient.organization_id != self.organization_id:
+            raise ValidationError({"patient": "Patient must belong to the same organization."})
+        if self.payer_id and self.organization_id and self.payer.organization_id != self.organization_id:
+            raise ValidationError({"payer": "Payer must belong to the same organization."})
+        if self.termination_date and self.effective_date and self.termination_date < self.effective_date:
+            raise ValidationError({"terminationDate": "Termination date cannot be before the effective date."})
+        if self.coinsurance_percent is not None and not (0 <= self.coinsurance_percent <= 100):
+            raise ValidationError({"coinsurancePercent": "Coinsurance must be between 0 and 100 percent."})
+
+    @property
+    def is_active(self) -> bool:
+        today = timezone.localdate()
+        if self.effective_date and self.effective_date > today:
+            return False
+        if self.termination_date and self.termination_date <= today:
+            return False
+        return True
+
+    def __str__(self) -> str:
+        return "%s — %s (%s)" % (self.patient, self.payer, self.get_rank_display())
+
+
+_CPT_CODE_VALIDATOR = RegexValidator(
+    regex=r"^[A-Z0-9]{5}$", message="Enter a 5-character CPT/HCPCS code (e.g. 97110)."
+)
+_MODIFIER_VALIDATOR = RegexValidator(regex=r"^[A-Z0-9]{2}$", message="Modifiers must be 2 characters (e.g. GP, 59).")
+
+
+class Charge(UUIDTimeStampedModel):
+    """One billable line item — the unit that will eventually roll up into a
+    Claim (a later phase). `recommended_units` is always computed server-side
+    from documented timed minutes via the same 8-minute-rule engine used for
+    AI coding suggestions (see services.coding_suggestions); it is never
+    client-supplied, so it stays a trustworthy comparison point. Entering a
+    different `units` value is always allowed — this only assists billing
+    staff, it never blocks or rewrites clinician documentation — but requires
+    `units_override_reason` once there is a recommendation to diverge from."""
+
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Draft"
+        READY = "ready", "Ready to bill"
+        BILLED = "billed", "Billed"
+        VOID = "void", "Void"
+
+    organization = models.ForeignKey(Organization, on_delete=models.PROTECT, related_name="charges")
+    patient = models.ForeignKey(Patient, on_delete=models.PROTECT, related_name="charges")
+    episode_of_care = models.ForeignKey(
+        EpisodeOfCare, on_delete=models.SET_NULL, null=True, blank=True, related_name="charges"
+    )
+    clinical_note = models.ForeignKey(
+        ClinicalNote, on_delete=models.SET_NULL, null=True, blank=True, related_name="charges"
+    )
+    provider = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="rendered_charges")
+    location = models.ForeignKey(Location, on_delete=models.SET_NULL, null=True, blank=True, related_name="charges")
+    claim = models.ForeignKey("Claim", on_delete=models.SET_NULL, null=True, blank=True, related_name="charges")
+    superbill = models.ForeignKey(
+        "Superbill", on_delete=models.SET_NULL, null=True, blank=True, related_name="charges"
+    )
+    service_date = models.DateField()
+    cpt_code = models.CharField(max_length=5, validators=[_CPT_CODE_VALIDATOR])
+    modifiers = models.JSONField(default=list, blank=True)
+    units = models.PositiveSmallIntegerField(default=1)
+    minutes = models.PositiveSmallIntegerField(null=True, blank=True)
+    recommended_units = models.PositiveSmallIntegerField(null=True, blank=True)
+    units_override_reason = models.TextField(blank=True)
+    diagnosis_codes = models.ManyToManyField(DiagnosisCode, blank=True, related_name="charges")
+    charge_amount = models.DecimalField(max_digits=10, decimal_places=2)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.DRAFT)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="created_charges"
+    )
+
+    class Meta:
+        ordering = ["-service_date", "-created_at"]
+        indexes = [models.Index(fields=["organization", "patient", "service_date"])]
+
+    def clean(self):
+        if self.patient_id and self.organization_id and self.patient.organization_id != self.organization_id:
+            raise ValidationError({"patient": "Patient must belong to the same organization."})
+        if self.episode_of_care_id and self.episode_of_care.patient_id != self.patient_id:
+            raise ValidationError({"episodeOfCareId": "Episode of care must belong to this patient."})
+        if self.clinical_note_id and self.clinical_note.patient_id != self.patient_id:
+            raise ValidationError({"noteId": "The linked note must belong to this patient."})
+        if self.location_id and self.organization_id and self.location.organization_id != self.organization_id:
+            raise ValidationError({"locationId": "Location must belong to the same organization."})
+        if self.superbill_id and self.superbill.patient_id != self.patient_id:
+            raise ValidationError({"superbillId": "Superbill must belong to this patient."})
+        if self.claim_id and self.superbill_id:
+            raise ValidationError({"claimId": "A charge can be billed to insurance or cash-pay, not both."})
+        if not isinstance(self.modifiers, list) or len(self.modifiers) > 4:
+            raise ValidationError({"modifiers": "Enter at most 4 modifiers."})
+        for modifier in self.modifiers:
+            try:
+                _MODIFIER_VALIDATOR(modifier)
+            except ValidationError:
+                raise ValidationError({"modifiers": "Modifiers must each be 2 characters (e.g. GP, 59)."})
+        if (
+            self.recommended_units is not None
+            and self.units != self.recommended_units
+            and not self.units_override_reason.strip()
+        ):
+            raise ValidationError(
+                {"unitsOverrideReason": "Explain why the entered units differ from the recommended units."}
+            )
+
+    @property
+    def units_difference(self) -> int | None:
+        if self.recommended_units is None:
+            return None
+        return self.units - self.recommended_units
+
+    def __str__(self) -> str:
+        return "%s — %s x%s (%s)" % (self.patient, self.cpt_code, self.units, self.service_date)
+
+
+class Claim(UUIDTimeStampedModel):
+    """An insurance claim — one or more Charge line items billed together
+    against one patient insurance policy. `diagnosis_code_list` is an
+    ordered snapshot (CMS-1500 box 21, lettered A-L) built once at claim
+    creation from the union of its charges' diagnosis codes; each charge's
+    diagnosis pointer letters are derived from this list at read time
+    (`diagnosis_pointers_for`), never stored per charge. Cash-pay billing
+    uses Superbill, not Claim — a claim always requires insurance."""
+
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Draft"
+        READY = "ready", "Ready"
+        VALIDATION_ERROR = "validation_error", "Validation Error"
+        SUBMITTED = "submitted", "Submitted"
+        ACCEPTED = "accepted", "Accepted"
+        REJECTED = "rejected", "Rejected"
+        PROCESSING = "processing", "Processing"
+        DENIED = "denied", "Denied"
+        PARTIAL_PAYMENT = "partial_payment", "Partial Payment"
+        PAID = "paid", "Paid"
+        APPEALED = "appealed", "Appealed"
+        CORRECTED = "corrected", "Corrected"
+        CLOSED = "closed", "Closed"
+
+    # Statuses that represent a claim actively awaiting payer action — once a
+    # claim leaves DRAFT/READY/VALIDATION_ERROR, charges are locked in.
+    OPEN_STATUSES = {
+        Status.SUBMITTED, Status.ACCEPTED, Status.PROCESSING, Status.PARTIAL_PAYMENT, Status.APPEALED,
+    }
+    TERMINAL_STATUSES = {Status.PAID, Status.CLOSED}
+
+    organization = models.ForeignKey(Organization, on_delete=models.PROTECT, related_name="claims")
+    patient = models.ForeignKey(Patient, on_delete=models.PROTECT, related_name="claims")
+    patient_insurance = models.ForeignKey(PatientInsurance, on_delete=models.PROTECT, related_name="claims")
+    payer = models.ForeignKey(Payer, on_delete=models.PROTECT, related_name="claims")
+    diagnosis_code_list = models.JSONField(default=list, blank=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
+    clearinghouse_claim_id = models.CharField(max_length=80, blank=True)
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    closed_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="created_claims"
+    )
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["organization", "patient", "status"])]
+
+    def clean(self):
+        if self.patient_id and self.organization_id and self.patient.organization_id != self.organization_id:
+            raise ValidationError({"patient": "Patient must belong to the same organization."})
+        if self.patient_insurance_id and self.patient_insurance.patient_id != self.patient_id:
+            raise ValidationError({"patientInsuranceId": "Insurance policy must belong to this patient."})
+        if (
+            self.patient_insurance_id
+            and self.payer_id
+            and self.patient_insurance.payer_id != self.payer_id
+        ):
+            raise ValidationError({"payerId": "Payer must match the selected insurance policy's payer."})
+        if not isinstance(self.diagnosis_code_list, list) or len(self.diagnosis_code_list) > 12:
+            raise ValidationError({"diagnosisCodeList": "A claim can carry at most 12 diagnosis codes."})
+
+    @property
+    def total_charge_amount(self) -> Decimal:
+        return sum((charge.charge_amount for charge in self.charges.all()), Decimal("0.00"))
+
+    @property
+    def total_paid(self) -> Decimal:
+        """Insurance + patient payments, net of any refunds — computed live
+        from ClaimTransaction rows, never stored (same rule as everywhere
+        else in this module: a derivable total is not a field)."""
+        payments = sum(
+            (t.amount for t in self.transactions.all() if t.kind in (ClaimTransaction.Kind.INSURANCE_PAYMENT, ClaimTransaction.Kind.PATIENT_PAYMENT)),
+            Decimal("0.00"),
+        )
+        refunds = sum((t.amount for t in self.transactions.all() if t.kind == ClaimTransaction.Kind.REFUND), Decimal("0.00"))
+        return payments - refunds
+
+    @property
+    def total_adjusted(self) -> Decimal:
+        return sum(
+            (t.amount for t in self.transactions.all() if t.kind in (ClaimTransaction.Kind.ADJUSTMENT, ClaimTransaction.Kind.WRITE_OFF)),
+            Decimal("0.00"),
+        )
+
+    @property
+    def balance(self) -> Decimal:
+        return self.total_charge_amount - self.total_paid - self.total_adjusted
+
+    def diagnosis_pointers_for(self, charge: "Charge") -> list[str]:
+        """CMS-1500 box 24E letters (A-L) for one charge line, derived from
+        this claim's stored diagnosis_code_list — never stored per charge."""
+        codes_on_charge = {code.code for code in charge.diagnosis_codes.all()}
+        return [
+            chr(65 + index)
+            for index, code in enumerate(self.diagnosis_code_list)
+            if code in codes_on_charge
+        ]
+
+    def __str__(self) -> str:
+        return "%s — %s (%s)" % (self.patient, self.payer, self.get_status_display())
+
+
+class ClaimTransaction(UUIDTimeStampedModel):
+    """One ledger entry against an insurance claim — an ERA/EOB line posted
+    manually (no clearinghouse ERA feed is connected yet; see
+    care/clearinghouse.py), a patient payment, a contractual adjustment, a
+    write-off, a refund, or a balance transfer to a secondary claim. `claim`
+    is nullable specifically to model an unmatched payment sitting in a
+    reconciliation queue until a biller matches it (see `claim_matched`).
+    Cash-pay payments keep using PaymentRecord/Superbill — this model is
+    insurance-claim-ledger only, to avoid two competing payment concepts."""
+
+    class Kind(models.TextChoices):
+        INSURANCE_PAYMENT = "insurance_payment", "Insurance Payment"
+        PATIENT_PAYMENT = "patient_payment", "Patient Payment"
+        ADJUSTMENT = "adjustment", "Contractual Adjustment"
+        WRITE_OFF = "write_off", "Write-off"
+        REFUND = "refund", "Refund"
+        TRANSFER = "transfer", "Transfer"
+
+    class Method(models.TextChoices):
+        CHECK = "check", "Check"
+        EFT = "eft", "EFT"
+        CREDIT_CARD = "credit_card", "Credit Card"
+        CASH = "cash", "Cash"
+        ERA = "era", "ERA (Electronic)"
+        OTHER = "other", "Other"
+
+    organization = models.ForeignKey(Organization, on_delete=models.PROTECT, related_name="claim_transactions")
+    patient = models.ForeignKey(Patient, on_delete=models.PROTECT, related_name="claim_transactions")
+    claim = models.ForeignKey(Claim, on_delete=models.SET_NULL, null=True, blank=True, related_name="transactions")
+    transferred_to_claim = models.ForeignKey(
+        Claim, on_delete=models.SET_NULL, null=True, blank=True, related_name="incoming_transfers"
+    )
+    kind = models.CharField(max_length=20, choices=Kind.choices)
+    method = models.CharField(max_length=16, choices=Method.choices, blank=True)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    payment_date = models.DateField(default=timezone.localdate)
+    reference = models.CharField(max_length=160, blank=True)
+    denial_code = models.CharField(max_length=20, blank=True)
+    denial_reason = models.CharField(max_length=240, blank=True)
+    notes = models.TextField(blank=True)
+    recorded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="recorded_claim_transactions"
+    )
+
+    class Meta:
+        ordering = ["-payment_date", "-created_at"]
+        indexes = [
+            models.Index(fields=["organization", "patient", "payment_date"]),
+            models.Index(fields=["claim"]),
+        ]
+
+    def clean(self):
+        if self.patient_id and self.organization_id and self.patient.organization_id != self.organization_id:
+            raise ValidationError({"patient": "Patient must belong to the same organization."})
+        if self.claim_id and self.claim.patient_id != self.patient_id:
+            raise ValidationError({"claimId": "Claim must belong to this patient."})
+        if self.kind == self.Kind.TRANSFER and not self.transferred_to_claim_id:
+            raise ValidationError({"transferredToClaimId": "A transfer requires a destination claim."})
+        if self.transferred_to_claim_id and self.transferred_to_claim.patient_id != self.patient_id:
+            raise ValidationError({"transferredToClaimId": "Destination claim must belong to this patient."})
+        if self.transferred_to_claim_id and self.transferred_to_claim_id == self.claim_id:
+            raise ValidationError({"transferredToClaimId": "A transfer's destination must be a different claim."})
+        if self.amount is not None and self.amount <= 0:
+            raise ValidationError({"amount": "Amount must be greater than zero."})
+
+    @property
+    def is_matched(self) -> bool:
+        return self.claim_id is not None
+
+    def __str__(self) -> str:
+        return "%s — %s (%s)" % (self.patient, self.get_kind_display(), self.amount)
+
+
+class ClaimDenial(UUIDTimeStampedModel):
+    """One denial work-queue item for a claim. A claim can be denied more
+    than once across resubmission/appeal cycles, so this is a child table,
+    not a field on Claim — each row tracks its own owner, follow-up
+    deadline, and resolution independently of the claim's own status."""
+
+    class AppealStatus(models.TextChoices):
+        NOT_APPEALED = "not_appealed", "Not Appealed"
+        PREPARING = "preparing", "Preparing Appeal"
+        SUBMITTED = "submitted", "Appeal Submitted"
+        WON = "won", "Appeal Won"
+        LOST = "lost", "Appeal Lost"
+
+    class Resolution(models.TextChoices):
+        OPEN = "open", "Open"
+        RESOLVED_PAID = "resolved_paid", "Resolved — Paid"
+        RESOLVED_WRITTEN_OFF = "resolved_written_off", "Resolved — Written Off"
+        RESOLVED_PATIENT_BILLED = "resolved_patient_billed", "Resolved — Billed to Patient"
+
+    organization = models.ForeignKey(Organization, on_delete=models.PROTECT, related_name="claim_denials")
+    patient = models.ForeignKey(Patient, on_delete=models.PROTECT, related_name="claim_denials")
+    claim = models.ForeignKey(Claim, on_delete=models.PROTECT, related_name="denials")
+    denial_code = models.CharField(max_length=20, blank=True)
+    denial_reason = models.CharField(max_length=240)
+    denied_on = models.DateField(default=timezone.localdate)
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="owned_denials"
+    )
+    due_date = models.DateField(null=True, blank=True)
+    action_notes = models.TextField(blank=True)
+    appeal_status = models.CharField(max_length=16, choices=AppealStatus.choices, default=AppealStatus.NOT_APPEALED)
+    resolution = models.CharField(max_length=24, choices=Resolution.choices, default=Resolution.OPEN)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="created_denials"
+    )
+
+    class Meta:
+        ordering = ["resolution", "due_date", "-denied_on"]
+        indexes = [models.Index(fields=["organization", "resolution", "due_date"])]
+
+    def clean(self):
+        if self.patient_id and self.organization_id and self.patient.organization_id != self.organization_id:
+            raise ValidationError({"patient": "Patient must belong to the same organization."})
+        if self.claim_id and self.claim.patient_id != self.patient_id:
+            raise ValidationError({"claimId": "Claim must belong to this patient."})
+
+    @property
+    def is_overdue(self) -> bool:
+        return (
+            self.resolution == self.Resolution.OPEN
+            and self.due_date is not None
+            and self.due_date < timezone.localdate()
+        )
+
+    def __str__(self) -> str:
+        return "%s — %s (%s)" % (self.patient, self.denial_reason, self.get_resolution_display())
 
 
 class Superbill(UUIDTimeStampedModel):
@@ -1676,6 +2682,156 @@ class PaymentRecord(UUIDTimeStampedModel):
             raise ValidationError(
                 {"superbill": "A payment can only be linked to this patient's superbill."}
             )
+
+
+class PatientPayment(UUIDTimeStampedModel):
+    """A patient-initiated online payment attempt through the portal —
+    distinct from PaymentRecord (staff manually recording a payment already
+    collected out-of-band) and ClaimTransaction (insurance-ledger posting).
+    Routed through care/payment_processor.py, the same swap-in-a-real-
+    integration seam as ClearinghouseAdapter. Every attempt is kept,
+    succeeded or not, for a complete patient-facing payment history —
+    insert-only, matching the audit-trail convention of this whole app.
+    Never stores card/CVV — see care/payment_processor.py's docstring."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        SUCCEEDED = "succeeded", "Succeeded"
+        FAILED = "failed", "Failed"
+
+    patient = models.ForeignKey(Patient, on_delete=models.PROTECT, related_name="online_payments")
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
+    processor_reference = models.CharField(max_length=160, blank=True)
+    failure_message = models.TextField(blank=True)
+    attempted_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["-attempted_at"]
+        indexes = [models.Index(fields=["patient", "-attempted_at"])]
+
+    def clean(self):
+        if self.amount is not None and self.amount <= 0:
+            raise ValidationError({"amount": "Enter an amount greater than zero."})
+
+    def __str__(self) -> str:
+        return f"{self.patient} — ${self.amount} ({self.get_status_display()})"
+
+
+class ServicePrice(UUIDTimeStampedModel):
+    """Org-configurable cash-pay price list — one row per CPT/service, the
+    same data-driven-not-hard-coded pattern as Payer. Cash-pay charges look
+    up a price here rather than the UI hard-coding a dollar figure."""
+
+    organization = models.ForeignKey(Organization, on_delete=models.PROTECT, related_name="service_prices")
+    cpt_code = models.CharField(max_length=5, validators=[_CPT_CODE_VALIDATOR])
+    label = models.CharField(max_length=160)
+    price = models.DecimalField(max_digits=10, decimal_places=2)
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="created_service_prices"
+    )
+
+    class Meta:
+        ordering = ["cpt_code"]
+        constraints = [
+            models.UniqueConstraint(fields=["organization", "cpt_code"], name="unique_service_price_per_org_cpt")
+        ]
+
+    def __str__(self) -> str:
+        return "%s — %s (%s)" % (self.cpt_code, self.label, self.price)
+
+
+class CashPackage(UUIDTimeStampedModel):
+    """A pre-paid bundle of visits or a recurring membership sold directly
+    to a patient — cash-pay only, no insurance claim involved.
+    `visits_included=None` models an unlimited membership; a fixed package
+    tracks `visits_used` the same way Authorization tracks visit
+    consumption, but this counter is not auto-decremented on note-signing
+    (unlike Authorization) since a package purchase is a front-desk/billing
+    transaction, not a clinical-authorization one — staff mark usage
+    explicitly via `record_visit`."""
+
+    class Kind(models.TextChoices):
+        PACKAGE = "package", "Visit Package"
+        MEMBERSHIP = "membership", "Membership"
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        EXPIRED = "expired", "Expired"
+        CANCELLED = "cancelled", "Cancelled"
+
+    organization = models.ForeignKey(Organization, on_delete=models.PROTECT, related_name="cash_packages")
+    patient = models.ForeignKey(Patient, on_delete=models.PROTECT, related_name="cash_packages")
+    kind = models.CharField(max_length=16, choices=Kind.choices)
+    name = models.CharField(max_length=160)
+    visits_included = models.PositiveSmallIntegerField(null=True, blank=True)
+    visits_used = models.PositiveSmallIntegerField(default=0)
+    price = models.DecimalField(max_digits=10, decimal_places=2)
+    discount_percent = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    purchased_on = models.DateField(default=timezone.localdate)
+    expires_at = models.DateField(null=True, blank=True)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.ACTIVE)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="created_cash_packages"
+    )
+
+    class Meta:
+        ordering = ["-purchased_on"]
+        indexes = [models.Index(fields=["organization", "patient", "status"])]
+
+    def clean(self):
+        if self.patient_id and self.organization_id and self.patient.organization_id != self.organization_id:
+            raise ValidationError({"patient": "Patient must belong to the same organization."})
+        if self.visits_included is not None and self.visits_used > self.visits_included:
+            raise ValidationError({"visitsUsed": "Visits used cannot exceed visits included."})
+        if self.discount_percent is not None and not (0 <= self.discount_percent <= 100):
+            raise ValidationError({"discountPercent": "Discount must be between 0 and 100 percent."})
+
+    @property
+    def visits_remaining(self) -> int | None:
+        if self.visits_included is None:
+            return None
+        return max(0, self.visits_included - self.visits_used)
+
+    @property
+    def is_active(self) -> bool:
+        if self.status != self.Status.ACTIVE:
+            return False
+        if self.expires_at and self.expires_at < timezone.localdate():
+            return False
+        if self.visits_included is not None and self.visits_remaining == 0:
+            return False
+        return True
+
+    def __str__(self) -> str:
+        return "%s — %s" % (self.patient, self.name)
+
+
+class PatientStatement(UUIDTimeStampedModel):
+    """A generated patient billing statement. Only the generation event and
+    a balance snapshot are stored — the itemized charges/payments/
+    adjustments are rebuilt live from Claim/Charge/ClaimTransaction data at
+    view/print time (see billing_services.build_patient_statement_data),
+    filtered to activity on or before `statement_date` so a previously
+    generated statement's line items stay reproducible even as new
+    activity is posted later."""
+
+    organization = models.ForeignKey(Organization, on_delete=models.PROTECT, related_name="patient_statements")
+    patient = models.ForeignKey(Patient, on_delete=models.PROTECT, related_name="statements")
+    statement_date = models.DateField(default=timezone.localdate)
+    due_date = models.DateField()
+    balance_at_generation = models.DecimalField(max_digits=10, decimal_places=2)
+    generated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="generated_statements"
+    )
+
+    class Meta:
+        ordering = ["-statement_date"]
+        indexes = [models.Index(fields=["organization", "patient", "-statement_date"])]
+
+    def __str__(self) -> str:
+        return "%s — statement %s" % (self.patient, self.statement_date)
 
 
 class AuditEvent(models.Model):

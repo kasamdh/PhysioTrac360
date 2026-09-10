@@ -1,6 +1,11 @@
-import type { WorkspaceUser } from "../api/types";
+import { useEffect, useState } from "react";
+
+import { ApiError, api } from "../api/client";
+import type { GlobalAuditEvent, SuperAdminDashboard, WorkspaceUser } from "../api/types";
 import type { WorkspacePage } from "../components/AppShell";
 import { HomeTopBar } from "../components/HomeTopBar";
+import { MetricCard } from "@/components/ui/metric-card";
+import { formatDateTime } from "../lib/format";
 
 interface SuperAdminHomePageProps {
   user: WorkspaceUser;
@@ -22,16 +27,169 @@ function IconAdministration() {
   );
 }
 
+function ActivityRow({ event }: { event: GlobalAuditEvent }) {
+  return (
+    <li className="flex items-start justify-between gap-3 border-t border-[#edf0f4] py-2.5 first:border-t-0 first:pt-0">
+      <div className="min-w-0">
+        <p className="m-0 truncate text-sm font-semibold text-[#1c1f23]">{event.action.replace(/_/g, " ")}</p>
+        <p className="m-0 truncate text-[0.8125rem] text-[#6B7280]">
+          {event.actor} {event.clientName ? `· ${event.clientName}` : ""}
+        </p>
+      </div>
+      <time className="shrink-0 text-[0.8125rem] text-[#6B7280]">{formatDateTime(event.createdAt)}</time>
+    </li>
+  );
+}
+
 export function SuperAdminHomePage({ user, onNavigate, onLogout }: SuperAdminHomePageProps) {
+  const [data, setData] = useState<SuperAdminDashboard | null>(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    api
+      .superAdminDashboard()
+      .then((result) => active && setData(result))
+      .catch((requestError) => active && setError(requestError instanceof ApiError ? requestError.message : "Unable to load the dashboard."))
+      .finally(() => active && setLoading(false));
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const credentialTotal = data
+    ? data.credentialAlerts.expired + data.credentialAlerts.critical + data.credentialAlerts.expiring_soon
+    : 0;
+  const maxTrendCount = data ? Math.max(1, ...data.failedLoginTrend.map((row) => row.count)) : 1;
+
   return (
     <div className="flex min-h-screen flex-col bg-white">
       <HomeTopBar user={user} onLogout={onLogout} onHome={() => onNavigate("dashboard")} brandLabel="Source Motion PT" />
-      <div className="mx-auto flex w-full max-w-[1040px] flex-1 flex-col px-6 pt-10">
+      <div className="mx-auto flex w-full max-w-[1200px] flex-1 flex-col px-6 pt-10">
         <header className="mb-7 text-center">
           <h1 className="m-0 text-[clamp(1.75rem,3vw,2.125rem)] font-bold tracking-[-0.02em] text-[#172127]">
             Source Motion PT
           </h1>
         </header>
+
+        {loading && <p className="text-center text-sm text-[#6B7280]">Loading dashboard…</p>}
+        {error && (
+          <p role="alert" className="mx-auto mb-6 max-w-lg rounded-md border border-red-200 bg-red-50 px-4 py-3 text-center text-sm font-medium text-red-700">
+            {error}
+          </p>
+        )}
+
+        {data && (
+          <>
+            <div className="mb-8 grid grid-cols-2 gap-3 min-[700px]:grid-cols-3 min-[1000px]:grid-cols-5">
+              <MetricCard label="Total Organizations" value={data.organizations.total} onClick={() => onNavigate("clients")} />
+              <MetricCard label="Active Organizations" value={data.organizations.active} tone="green" onClick={() => onNavigate("clients")} />
+              <MetricCard label="Suspended Organizations" value={data.organizations.suspended} tone="amber" onClick={() => onNavigate("clients")} />
+              <MetricCard label="Archived Organizations" value={data.organizations.archived} onClick={() => onNavigate("clients")} />
+              <MetricCard label="Total Locations" value={data.locationsTotal} />
+              <MetricCard label="Total Users" value={data.users.total} onClick={() => onNavigate("users")} />
+              <MetricCard label="Active PTs" value={data.users.activePts} tone="blue" onClick={() => onNavigate("users")} />
+              <MetricCard label="Active PTAs" value={data.users.activePtas} tone="blue" onClick={() => onNavigate("users")} />
+              <MetricCard
+                label="Credential Expiration Alerts"
+                value={credentialTotal}
+                tone={credentialTotal > 0 ? "crimson" : "neutral"}
+                detail={`${data.credentialAlerts.expired} expired`}
+                onClick={() => onNavigate("credentials")}
+              />
+              <MetricCard label="Total Patients" value={data.patientsTotal} />
+            </div>
+
+            <div className="mb-10 grid grid-cols-1 gap-6 min-[900px]:grid-cols-2">
+              <section className="rounded-[14px] border border-border p-5">
+                <h2 className="m-0 mb-3 text-lg font-bold text-[#1c1f23]">Subscription Status</h2>
+                {Object.keys(data.subscriptionTiers).length === 0 ? (
+                  <p className="m-0 text-sm text-[#6B7280]">No active organizations yet.</p>
+                ) : (
+                  <ul className="m-0 list-none p-0">
+                    {Object.entries(data.subscriptionTiers).map(([tier, count]) => (
+                      <li key={tier} className="flex items-center justify-between gap-3 border-t border-[#edf0f4] py-2.5 first:border-t-0 first:pt-0">
+                        <span className="text-sm font-semibold capitalize text-[#1c1f23]">{tier}</span>
+                        <span className="text-sm text-[#6B7280]">{count} organization{count === 1 ? "" : "s"}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+
+              <section className="rounded-[14px] border border-border p-5">
+                <h2 className="m-0 mb-3 text-lg font-bold text-[#1c1f23]">Recent Organizations</h2>
+                {data.recentOrganizations.length === 0 ? (
+                  <p className="m-0 text-sm text-[#6B7280]">No organizations yet.</p>
+                ) : (
+                  <ul className="m-0 list-none p-0">
+                    {data.recentOrganizations.map((org) => (
+                      <li key={org.clientNumber} className="flex items-center justify-between gap-3 border-t border-[#edf0f4] py-2.5 first:border-t-0 first:pt-0">
+                        <div className="min-w-0">
+                          <p className="m-0 truncate text-sm font-semibold text-[#1c1f23]">
+                            #{org.clientNumber} — {org.clientName}
+                          </p>
+                          <p className="m-0 text-[0.8125rem] text-[#6B7280]">{formatDateTime(org.createdAt)}</p>
+                        </div>
+                        <span className="shrink-0 rounded-full bg-[#F7F7F8] px-2.5 py-1 text-xs font-semibold text-[#1c1f23]">
+                          {org.statusLabel}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+
+              <section className="rounded-[14px] border border-border p-5">
+                <h2 className="m-0 mb-3 text-lg font-bold text-[#1c1f23]">Recent User Activity</h2>
+                {data.recentUserActivity.length === 0 ? (
+                  <p className="m-0 text-sm text-[#6B7280]">No recent sign-in activity.</p>
+                ) : (
+                  <ul className="m-0 list-none p-0">
+                    {data.recentUserActivity.map((event) => (
+                      <ActivityRow key={event.id} event={event} />
+                    ))}
+                  </ul>
+                )}
+              </section>
+
+              <section className="rounded-[14px] border border-border p-5">
+                <h2 className="m-0 mb-3 text-lg font-bold text-[#1c1f23]">Recent Audit Events</h2>
+                {data.recentAuditEvents.length === 0 ? (
+                  <p className="m-0 text-sm text-[#6B7280]">No audit events yet.</p>
+                ) : (
+                  <ul className="m-0 list-none p-0">
+                    {data.recentAuditEvents.map((event) => (
+                      <ActivityRow key={event.id} event={event} />
+                    ))}
+                  </ul>
+                )}
+              </section>
+
+              <section className="rounded-[14px] border border-border p-5">
+                <h2 className="m-0 mb-1 text-lg font-bold text-[#1c1f23]">Failed Login Trend</h2>
+                <p className="m-0 mb-3 text-[0.8125rem] text-[#6B7280]">Last 7 days, across every organization.</p>
+                {data.failedLoginTrend.length === 0 ? (
+                  <p className="m-0 text-sm text-[#6B7280]">No failed sign-in attempts recorded.</p>
+                ) : (
+                  <div className="flex h-24 items-end gap-2">
+                    {data.failedLoginTrend.map((row) => (
+                      <div key={row.date} className="flex flex-1 flex-col items-center gap-1">
+                        <div
+                          className="w-full rounded-t-[4px] bg-primary"
+                          style={{ height: `${Math.max(6, (row.count / maxTrendCount) * 80)}px` }}
+                          title={`${row.count} on ${row.date}`}
+                        />
+                        <span className="text-[0.6875rem] text-[#6B7280]">{row.date.slice(5)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </section>
+            </div>
+          </>
+        )}
 
         <nav aria-label="Platform administration modules" className="mb-10">
           <button

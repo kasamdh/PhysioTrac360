@@ -160,6 +160,7 @@ export function AdminHomePage({ user, onNavigate, onLogout }: AdminHomePageProps
     clients: false,
     "clinic-settings": false,
     "admin-hub": false,
+    credentials: false,
   };
   const modules = allModules.filter((module) => visibility[module.key]);
 

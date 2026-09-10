@@ -10,6 +10,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { formatDate, formatDateTime } from "@/lib/format";
 import { AddendumDialog } from "./AddendumDialog";
 import { BodyChart, PAIN_QUALITIES, type PainMapPoint } from "./BodyChart";
+import { CodingSuggestionsPanel } from "./CodingSuggestionsPanel";
 import { CosignBanner } from "./CosignBanner";
 import { GoalsSection } from "./GoalsSection";
 import { InterventionTable } from "./InterventionTable";
@@ -418,12 +419,15 @@ export function DocumentationWorkspace({ patientId, noteId, user, onBack }: Docu
             <div>
               <h3 className="m-0 mb-4 text-lg font-bold text-foreground">Objective</h3>
               {note.noteType === "daily" || note.noteType === "handoff" ? (
-                <InterventionTable
-                  noteId={note.id}
-                  items={note.interventionItems}
-                  disabled={readOnly}
-                  onSaved={(items) => setNote((current) => (current ? { ...current, interventionItems: items } : current))}
-                />
+                <>
+                  <InterventionTable
+                    noteId={note.id}
+                    items={note.interventionItems}
+                    disabled={readOnly}
+                    onSaved={(items) => setNote((current) => (current ? { ...current, interventionItems: items } : current))}
+                  />
+                  <CodingSuggestionsPanel noteId={note.id} disabled={readOnly} />
+                </>
               ) : (
                 <>
                   <h4 className="m-0 mb-2 text-xs font-bold uppercase tracking-wide text-muted-foreground">Range of Motion</h4>

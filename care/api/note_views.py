@@ -15,9 +15,10 @@ from django.views.decorators.http import require_GET, require_http_methods, requ
 
 from .. import note_management
 from ..access import CLINICAL_ROLES, organization_required, patients_for, require_patient_access
-from ..models import ClinicalNote, NoteIntervention, Patient, User
-from ..services import record_audit_event
-from .serializers import serialize_intervention, serialize_note_detail, serialize_note_summary
+from ..entitlements import organization_has_feature
+from ..models import AIArtifact, ClinicalNote, NoteIntervention, Patient, User
+from ..services import _source_fingerprint, coding_suggestions, format_coding_draft_text, record_audit_event
+from .serializers import serialize_artifact, serialize_intervention, serialize_note_detail, serialize_note_summary
 from .utils import InvalidJSON, api_error, api_login_required, api_validation_error, json_body, organization_or_error
 
 
@@ -173,10 +174,18 @@ def note_create(request, patient_id: str):
             # Never create a duplicate encounter note for an appointment that already has one.
             return JsonResponse({"note": serialize_note_detail(existing)}, status=200)
 
+    episode_of_care = None
+    episode_id = payload.get("episodeOfCareId")
+    if episode_id:
+        episode_of_care = patient.episodes_of_care.filter(pk=episode_id).first()
+        if episode_of_care is None:
+            return api_error("Episode of care was not found for this patient.", status=404)
+
     note = ClinicalNote(
         patient=patient,
         therapist=request.user,
         appointment=appointment,
+        episode_of_care=episode_of_care,
         note_type=note_type,
         diagnosis_snapshot=patient.diagnoses,
         precautions_snapshot=patient.precautions,
@@ -349,6 +358,9 @@ def interventions_replace(request, note_id: str):
             units = int(row["units"]) if row.get("units") not in (None, "") else None
         except (TypeError, ValueError):
             return api_error("Minutes and units must be whole numbers.", status=400)
+        category = row.get("category") or ""
+        if category and category not in NoteIntervention.Category.values:
+            return api_error("Choose a supported intervention category.", status=400)
         item = NoteIntervention(
             note=note,
             description=description,
@@ -358,6 +370,7 @@ def interventions_replace(request, note_id: str):
             is_timed=bool(row.get("isTimed", True)),
             patient_response=str(row.get("patientResponse", "")).strip(),
             order=index,
+            category=category,
         )
         try:
             item.full_clean()
@@ -373,3 +386,37 @@ def interventions_replace(request, note_id: str):
         metadata={"count": len(prepared), "total_minutes": sum(item.minutes for item in prepared)},
     )
     return JsonResponse({"interventionItems": [serialize_intervention(item) for item in note.intervention_items.all()]})
+
+
+@require_POST
+@api_login_required
+def coding_suggestions_create(request, note_id: str):
+    """Deterministic, rule-based CPT-coding suggestions for this note's
+    documented interventions — never an autonomous coder. Every result is
+    stored as an auditable AIArtifact and must show as suggested, never
+    submitted automatically (see `care/services.py:coding_suggestions`)."""
+    note, error = _note_or_error(request, note_id)
+    if error:
+        return error
+    if not organization_has_feature(note.patient.organization, "ai_scribe"):
+        return api_error(
+            "AI-assisted coding suggestions are not enabled for this organization. Contact your administrator.",
+            status=403,
+        )
+    suggestion = coding_suggestions(note)
+    artifact = AIArtifact.objects.create(
+        patient=note.patient,
+        requested_by=request.user,
+        kind=AIArtifact.Kind.CODING,
+        source_note_ids=[str(note.pk)],
+        source_fingerprint=_source_fingerprint([note]),
+        draft_text=format_coding_draft_text(note, suggestion),
+    )
+    record_audit_event(
+        actor=request.user, action="ai_coding_suggestion.created", obj=artifact, patient=note.patient, request=request,
+        metadata={"note_id": str(note.pk), "cpt_code_count": len(suggestion["cptSuggestions"])},
+    )
+    return JsonResponse(
+        {"artifact": serialize_artifact(artifact, include_draft_text=True), "codingSuggestions": suggestion},
+        status=201,
+    )

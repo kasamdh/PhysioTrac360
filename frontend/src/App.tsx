@@ -8,6 +8,7 @@ import { AllUsersPage } from "./features/AllUsersPage";
 import { AppShell, type WorkspacePage } from "./components/AppShell";
 import { ClientDetailPage } from "./features/ClientDetailPage";
 import { ClinicSettingsPage } from "./features/ClinicSettingsPage";
+import { CredentialDashboardPage } from "./features/CredentialDashboardPage";
 import { DashboardPage } from "./features/DashboardPage";
 import { ClientManagementPage } from "./features/ClientManagementPage";
 import { DocumentationPage } from "./features/documentation/DocumentationPage";
@@ -16,6 +17,18 @@ import { ForcedPasswordChangeDialog } from "./features/ForcedPasswordChangeDialo
 import { LoginScreen } from "./features/LoginScreen";
 import { OrganizationUsersPage } from "./features/OrganizationUsersPage";
 import { PatientsPage } from "./features/PatientsPage";
+import { PortalAppointmentsPage } from "./features/portal/PortalAppointmentsPage";
+import { PortalBookingPage } from "./features/portal/PortalBookingPage";
+import { PortalDashboardPage } from "./features/portal/PortalDashboardPage";
+import { PortalDocumentsPage } from "./features/portal/PortalDocumentsPage";
+import { PortalFormsSection } from "./features/portal/PortalFormsSection";
+import { PortalHepPage } from "./features/portal/PortalHepPage";
+import { PortalMessagesPage } from "./features/portal/PortalMessagesPage";
+import { PortalOutcomesSection } from "./features/portal/PortalOutcomesSection";
+import { PortalPaymentsPage } from "./features/portal/PortalPaymentsPage";
+import { PortalProfilePage } from "./features/portal/PortalProfilePage";
+import { PortalShell, type PortalPage } from "./features/portal/PortalShell";
+import { PortalWaitlistPage } from "./features/portal/PortalWaitlistPage";
 import { PublicBookingPage } from "./features/PublicBookingPage";
 import { ReportsPage } from "./features/ReportsPage";
 import { SchedulePage } from "./features/SchedulePage";
@@ -28,7 +41,7 @@ const TENANT_PAGES: WorkspacePage[] = ["schedule", "patients", "documentation", 
 
 function pageFromHash(): WorkspacePage {
   const value = window.location.hash.replace("#", "").split("/")[0];
-  return (TENANT_PAGES as string[]).includes(value) || value === "clients" || value === "admin-hub"
+  return (TENANT_PAGES as string[]).includes(value) || value === "clients" || value === "admin-hub" || value === "credentials"
     ? (value as WorkspacePage)
     : "dashboard";
 }
@@ -67,6 +80,7 @@ export default function App() {
   const [invitationToken, setInvitationToken] = useState<string | null>(invitationTokenFromLocation);
   const [error, setError] = useState("");
   const [sessionNotice, setSessionNotice] = useState("");
+  const [portalPage, setPortalPage] = useState<PortalPage>("dashboard");
 
   useEffect(() => {
     return onSessionEnded((message) => {
@@ -154,8 +168,28 @@ export default function App() {
     return <ForcedPasswordChangeDialog user={user} onChanged={setUser} onLogout={() => void logout()} />;
   }
 
+  // Patients get a completely separate, much simpler shell — never the
+  // staff AppShell, sidebar, or any of the tenant-page routing below.
+  if (user.capabilities.isPatient) {
+    return (
+      <PortalShell user={user} page={portalPage} onNavigate={setPortalPage} onLogout={() => void logout()}>
+        {portalPage === "dashboard" && <PortalDashboardPage onNavigate={setPortalPage} />}
+        {portalPage === "appointments" && <PortalAppointmentsPage />}
+        {portalPage === "book" && <PortalBookingPage onBooked={() => setPortalPage("appointments")} />}
+        {portalPage === "forms" && <PortalFormsSection />}
+        {portalPage === "documents" && <PortalDocumentsPage />}
+        {portalPage === "hep" && <PortalHepPage />}
+        {portalPage === "outcomes" && <PortalOutcomesSection />}
+        {portalPage === "messages" && <PortalMessagesPage />}
+        {portalPage === "payments" && <PortalPaymentsPage />}
+        {portalPage === "profile" && <PortalProfilePage />}
+        {portalPage === "waitlist" && <PortalWaitlistPage />}
+      </PortalShell>
+    );
+  }
+
   const visiblePage = user.capabilities.isSuperAdmin
-    ? (["users", "clients", "dashboard", "admin-hub"].includes(page) ? page : "dashboard")
+    ? (["users", "clients", "dashboard", "admin-hub", "credentials"].includes(page) ? page : "dashboard")
     : page === "schedule" && !user.capabilities.canManageSchedule
       ? "dashboard"
       : page === "documentation" && !user.capabilities.canAccessClinical
@@ -209,5 +243,6 @@ export default function App() {
         ? <ClientManagementPage />
         : <ClientDetailPage clientNumber={selectedClientNumber} onBack={() => navigate("clients")} />
     )}
+    {visiblePage === "credentials" && <CredentialDashboardPage />}
   </AppShell>;
 }

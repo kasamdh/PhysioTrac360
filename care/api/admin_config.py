@@ -7,12 +7,13 @@ from __future__ import annotations
 from datetime import timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from django.core.exceptions import ValidationError
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.db.models import Count, Q
 from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.http import require_GET, require_http_methods
 
+from ..access import BILLING_ROLES, require_role
 from ..models import Appointment, AppointmentType, ClinicalNote, Location, OutcomeScore, Patient, User
 from ..services import record_audit_event
 from .utils import api_error, api_login_required, json_body, organization_or_error
@@ -20,6 +21,12 @@ from .utils import api_error, api_login_required, json_body, organization_or_err
 
 def _admin_org_or_error(request):
     return organization_or_error(request, roles={User.Role.ADMIN})
+
+
+def _locations_read_org_or_error(request):
+    """Listing locations (never writing) is also needed by billing staff to
+    attribute a charge's service facility — see care/api/billing.py."""
+    return organization_or_error(request, roles={User.Role.ADMIN} | BILLING_ROLES)
 
 
 # --- Locations ---------------------------------------------------------
@@ -68,10 +75,14 @@ def validate_location_payload(payload: dict, *, partial: bool = False) -> dict[s
 @require_http_methods(["GET", "POST"])
 @api_login_required
 def locations(request):
-    organization, error = _admin_org_or_error(request)
+    organization, error = _locations_read_org_or_error(request)
     if error:
         return error
     if request.method == "POST":
+        try:
+            require_role(request.user, {User.Role.ADMIN})
+        except PermissionDenied as exc:
+            return api_error(str(exc), status=403)
         try:
             payload = json_body(request)
         except ValueError as exc:

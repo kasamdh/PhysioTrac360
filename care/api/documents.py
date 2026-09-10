@@ -13,9 +13,9 @@ from django.shortcuts import get_object_or_404
 from django.views.decorators.http import require_GET, require_http_methods
 
 from ..access import CLINICAL_ROLES, require_patient_access
-from ..models import Patient, PatientDocument
+from ..models import Patient, PatientDocument, User
 from ..services import record_audit_event
-from .utils import api_error, api_login_required, organization_or_error
+from .utils import InvalidJSON, api_error, api_login_required, api_validation_error, json_body, organization_or_error
 
 MAX_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MB
 
@@ -29,6 +29,8 @@ def serialize_document(document: PatientDocument) -> dict:
         "sizeBytes": document.size_bytes,
         "uploadedBy": document.uploaded_by.get_full_name() or document.uploaded_by.username,
         "uploadedAt": document.created_at.isoformat(),
+        "visibleToPatient": document.visible_to_patient,
+        "uploadedByPatient": document.uploaded_by.role == User.Role.PATIENT,
     }
 
 
@@ -62,6 +64,7 @@ def patient_documents(request, patient_id):
             title=title,
             description=request.POST.get("description", "").strip(),
             size_bytes=upload.size,
+            visible_to_patient=request.POST.get("visibleToPatient") == "true",
         )
         try:
             document.full_clean()
@@ -108,3 +111,41 @@ def patient_document_download(request, patient_id, document_id):
         metadata={"title": document.title},
     )
     return FileResponse(document.file.open("rb"), as_attachment=True, filename=document.original_filename)
+
+
+@require_http_methods(["PATCH"])
+@api_login_required
+def patient_document_visibility(request, patient_id, document_id):
+    """The one thing a clinician can change after upload: whether this
+    document is shared to the portal. Everything else about an uploaded
+    file (title, description, the file itself) is immutable — re-upload a
+    corrected copy instead, same as every other document-record pattern in
+    this codebase."""
+    _, error = organization_or_error(request, roles=CLINICAL_ROLES)
+    if error:
+        return error
+    patient = get_object_or_404(Patient, pk=patient_id)
+    try:
+        require_patient_access(request, patient, clinical=True)
+    except PermissionDenied as exc:
+        return api_error(str(exc), status=403)
+    document = PatientDocument.objects.filter(pk=document_id, patient=patient).first()
+    if not document:
+        return api_error("Document was not found.", status=404)
+    try:
+        payload = json_body(request)
+    except InvalidJSON as exc:
+        return api_error(str(exc), status=400)
+    if "visibleToPatient" not in payload:
+        return api_validation_error({"visibleToPatient": "This field is required."})
+    document.visible_to_patient = bool(payload["visibleToPatient"])
+    document.save(update_fields=["visible_to_patient", "updated_at"])
+    record_audit_event(
+        actor=request.user,
+        action="patient_document.visibility_changed",
+        obj=document,
+        patient=patient,
+        request=request,
+        metadata={"visible_to_patient": document.visible_to_patient},
+    )
+    return JsonResponse({"document": serialize_document(document)})

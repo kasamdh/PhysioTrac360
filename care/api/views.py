@@ -107,6 +107,14 @@ def login(request):
     auth_login(request, user)
     request.session.save()
     create_session(user, request)
+    if user.organization_id:
+        record_audit_event(
+            actor=user,
+            action="user.login_succeeded",
+            obj=user,
+            patient=getattr(user, "patient_profile", None),
+            request=request,
+        )
     return JsonResponse({"user": serialize_user(user), "csrfToken": get_token(request)})
 
 
@@ -665,8 +673,10 @@ def patient_for_edit(request, patient_id: str):
 @require_GET
 @api_login_required
 def staff_options(request):
-    """Assignable clinical staff for the caller's organization (e.g. a patient's therapist)."""
-    organization, error = organization_or_error(request, roles=SCHEDULING_ROLES)
+    """Assignable clinical staff for the caller's organization (e.g. a patient's
+    therapist, or a charge's rendering provider). Billing roles included
+    alongside scheduling roles so a biller can attribute a charge correctly."""
+    organization, error = organization_or_error(request, roles=SCHEDULING_ROLES | BILLING_ROLES)
     if error:
         return error
     staff = User.objects.filter(

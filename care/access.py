@@ -63,9 +63,18 @@ def organization_required(user):
 
 
 def patients_for(user, *, clinical: bool = True):
-    """Return patient records limited to the caller's organization and role."""
+    """Return patient records limited to the caller's organization and role.
+
+    The PATIENT-role check is deliberately first and unconditional — before
+    the `clinical` flag is even consulted. Every other role's `clinical`
+    flag toggles between "just my assigned patients" and "the whole org",
+    but a portal (PATIENT-role) account must NEVER receive the whole-org
+    queryset under any calling convention; it is always scoped to the one
+    chart linked via `Patient.portal_user`, full stop."""
     organization = organization_required(user)
     queryset = Patient.objects.filter(organization=organization)
+    if user.role == User.Role.PATIENT:
+        return queryset.filter(portal_user=user)
     if not clinical:
         return queryset
     if user.role in {
@@ -77,6 +86,35 @@ def patients_for(user, *, clinical: bool = True):
     if user.role in {User.Role.THERAPIST, User.Role.ASSISTANT}:
         return queryset.filter(assigned_therapist=user)
     return queryset.none()
+
+
+def require_portal_patient(request: HttpRequest) -> Patient:
+    """The ONLY way a patient-portal endpoint resolves "which patient" — the
+    authenticated session's own linked chart, never a patient id read from a
+    URL, request body, or query parameter. This is the primary IDOR defense
+    for the entire portal API surface: portal endpoints simply have no
+    client-suppliable patient identifier to spoof in the first place. Any
+    sub-resource within the portal (an appointment, a document, ...) must
+    still be looked up filtered by `patient=` the value this returns."""
+    if not getattr(request.user, "is_authenticated", False) or request.user.role != User.Role.PATIENT:
+        raise PermissionDenied("This endpoint is only available to patient portal accounts.")
+    organization = organization_required(request.user)
+    patient = Patient.objects.filter(organization=organization, portal_user=request.user).select_related("organization").first()
+    if patient is None:
+        raise PermissionDenied("No patient chart is linked to this portal account. Contact your clinic.")
+    return patient
+
+
+def portal_patient_or_error(request):
+    """Convenience wrapper matching this codebase's `(value, error_response)`
+    convention (see care/api/utils.py:organization_or_error) — every portal
+    view calls this instead of catching PermissionDenied itself."""
+    from django.http import JsonResponse
+
+    try:
+        return require_portal_patient(request), None
+    except PermissionDenied as exc:
+        return None, JsonResponse({"detail": str(exc)}, status=403)
 
 
 def require_role(user, roles: set[str]):

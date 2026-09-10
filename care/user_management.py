@@ -371,6 +371,14 @@ def register_failed_login(candidate: User) -> None:
         candidate.locked_until = candidate.locked_at + timezone.timedelta(minutes=settings.LOCKOUT_DURATION_MINUTES)
         update_fields += ["status", "is_active", "locked_at", "locked_until"]
     candidate.save(update_fields=update_fields)
+    if candidate.organization_id:
+        # One event per attempt (not just the eventual lockout) — this is
+        # the only source of truth for a failed-login trend; no PHI, no
+        # password, just the fact and the running attempt count.
+        record_audit_event(
+            actor=None, action="LOGIN_FAILED", obj=candidate, request=None,
+            metadata={"failed_login_attempts": candidate.failed_login_attempts},
+        )
     if candidate.status == User.Status.LOCKED_OUT and candidate.organization_id:
         record_audit_event(
             actor=None, action="USER_LOCKED", obj=candidate, request=None,

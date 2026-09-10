@@ -17,6 +17,7 @@ export function SuperAdminAdministrationPage({ user, onNavigate, onLogout }: Sup
   const items: AdminMenuItem[] = [
     { label: "Clients", action: () => onNavigate("clients") },
     { label: "Users", action: () => onNavigate("users") },
+    { label: "Credentials", action: () => onNavigate("credentials") },
   ];
 
   return (
