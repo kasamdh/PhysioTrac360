@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { ApiError, api } from "../api/client";
-import type { Patient, PrivilegedAccessGrant } from "../api/types";
+import type { MobileCareDashboardData, Patient, PrivilegedAccessGrant } from "../api/types";
 import { formatDate } from "../lib/format";
 import { ConfirmActionDialog } from "./ConfirmActionDialog";
 import { PrivilegedPatientChartDialog } from "./PrivilegedPatientChartDialog";
@@ -15,6 +15,7 @@ interface PrivilegedAccessTabProps {
 export function PrivilegedAccessTab({ clientNumber, clientName }: PrivilegedAccessTabProps) {
   const [grants, setGrants] = useState<PrivilegedAccessGrant[] | null>(null);
   const [patients, setPatients] = useState<Patient[] | null>(null);
+  const [mobileCare, setMobileCare] = useState<MobileCareDashboardData | null>(null);
   const [error, setError] = useState("");
   const [showRequest, setShowRequest] = useState(false);
   const [revokingGrant, setRevokingGrant] = useState<PrivilegedAccessGrant | null>(null);
@@ -35,6 +36,7 @@ export function PrivilegedAccessTab({ clientNumber, clientName }: PrivilegedAcce
   useEffect(() => {
     if (!activeGrant) {
       setPatients(null);
+      setMobileCare(null);
       return;
     }
     let active = true;
@@ -42,6 +44,10 @@ export function PrivilegedAccessTab({ clientNumber, clientName }: PrivilegedAcce
       .privilegedPatients(clientNumber)
       .then((result) => active && setPatients(result.patients))
       .catch((requestError) => active && setError(requestError instanceof ApiError ? requestError.message : "Unable to load patients."));
+    api
+      .privilegedMobileCareDashboard(clientNumber)
+      .then((result) => active && setMobileCare(result))
+      .catch(() => active && setMobileCare(null)); // Mobile Care may not be enabled for this client — not an error worth surfacing here
     return () => {
       active = false;
     };
@@ -66,6 +72,20 @@ export function PrivilegedAccessTab({ clientNumber, clientName }: PrivilegedAcce
           expires {formatDate(activeGrant.expiresAt, { month: "short", day: "numeric", year: "numeric" })} — {activeGrant.reason}
           {" "}<button className="text-action" onClick={() => setRevokingGrant(activeGrant)}>Revoke now</button>
         </div>
+      )}
+
+      {activeGrant && mobileCare && (
+        <>
+          <h3>Mobile Care overview</h3>
+          <section className="metric-grid" aria-label="Mobile Care at a glance">
+            <div className="metric-card"><span><strong>{mobileCare.cardCounts.todaysHomeVisits}</strong><small>Today's home visits</small></span></div>
+            <div className="metric-card"><span><strong>{mobileCare.cardCounts.pendingRequests}</strong><small>Pending requests</small></span></div>
+            <div className="metric-card"><span><strong>{mobileCare.cardCounts.providerOffers}</strong><small>Provider offers</small></span></div>
+            <div className="metric-card"><span><strong>{mobileCare.cardCounts.activeCareEpisodes}</strong><small>Active care episodes</small></span></div>
+            <div className="metric-card"><span><strong>{mobileCare.cardCounts.visitsNeedingAssignment}</strong><small>Visits needing assignment</small></span></div>
+            <div className="metric-card"><span><strong>{mobileCare.cardCounts.licenseProviderIssues}</strong><small>License/provider issues</small></span></div>
+          </section>
+        </>
       )}
 
       {activeGrant && (

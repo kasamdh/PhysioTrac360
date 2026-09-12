@@ -261,6 +261,7 @@ def serialize_note_detail(note) -> dict:
         "subjectiveDetails": note.subjective_details,
         "objectiveMeasurements": note.objective_measurements,
         "dischargeDetails": note.discharge_details,
+        "homeVisitDetails": note.home_visit_details,
         "planOfCareStart": note.plan_of_care_start.isoformat() if note.plan_of_care_start else None,
         "planOfCareEnd": note.plan_of_care_end.isoformat() if note.plan_of_care_end else None,
         "frequencyPerWeek": note.frequency_per_week,
@@ -442,16 +443,29 @@ def serialize_referral(referral) -> dict:
 
 
 def serialize_episode_of_care(episode) -> dict:
+    next_visit = episode.next_visit
     return {
         "id": str(episode.pk),
         "diagnosis": episode.diagnosis,
+        "condition": episode.condition,
         "status": episode.status,
         "statusLabel": episode.get_status_display(),
         "startDate": episode.start_date.isoformat(),
         "endDate": episode.end_date.isoformat() if episode.end_date else None,
+        "expectedEndDate": episode.expected_end_date.isoformat() if episode.expected_end_date else None,
+        "visitFrequency": episode.visit_frequency,
+        "expectedVisitCount": episode.expected_visit_count,
+        "visitsCompleted": episode.visits_completed_count,
+        "nextVisit": {"id": str(next_visit.pk), "startsAt": next_visit.starts_at.isoformat()} if next_visit else None,
+        "planOfCareEndDate": episode.plan_of_care_end_date.isoformat() if episode.plan_of_care_end_date else None,
         "notes": episode.notes,
         "primaryTherapistName": _display_name(episode.primary_therapist) if episode.primary_therapist else None,
         "referralId": str(episode.referral_id) if episode.referral_id else None,
+        # Whether this episode was created for/linked to an in-home
+        # (Mobile Care) service request — powers the "Mobile Care Episode"
+        # panel in the patient chart, distinguishing it from an ordinary
+        # in-clinic episode of care.
+        "isMobileCareEpisode": episode.mobile_care_requests.exists(),
         "createdBy": _display_name(episode.created_by) if episode.created_by else None,
         "createdAt": timezone.localtime(episode.created_at).isoformat(),
     }

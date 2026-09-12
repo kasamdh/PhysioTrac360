@@ -36,6 +36,17 @@ from ..booking import (
     reschedule_portal_appointment,
 )
 from ..entitlements import organization_has_feature
+from ..mobile_care import (
+    CANCELLABLE_REQUEST_STATUSES,
+    EDITABLE_REQUEST_STATUSES,
+    cancel_portal_request,
+    create_request,
+    estimate_assignment_arrival,
+    update_request,
+)
+from ..mobile_care_billing import estimate_home_visit_charges
+from ..mobile_care_settings import is_mobile_care_enabled
+from .mobile_care import serialize_home_visit_billing_estimate
 from ..form_engine import (
     display_status,
     ensure_form_templates,
@@ -53,7 +64,9 @@ from ..models import (
     HomeExercise,
     HomeExerciseLog,
     HomeProgram,
+    HomeVisitAssignment,
     Location,
+    MobileCareRequest,
     OutcomeAssignment,
     OutcomeScore,
     Patient,
@@ -673,6 +686,293 @@ def waitlist_staff_update_status(request, entry_id):
         metadata={"status": new_status},
     )
     return JsonResponse({"entry": _serialize_waitlist_entry(entry)})
+
+
+# --- Patient: in-home PT (mobile care) requests ------------------------------
+
+# Patient-facing workflow stage — a simplified, plain-language view of
+# MobileCareRequest.status distinct from `status`/`statusLabel` (the
+# staff-facing enum and its display text, e.g. "Matching", "Matched",
+# still returned below for anything that reads this generically). A
+# patient doesn't need to know the difference between MATCHING and
+# PROVIDER_OFFERED, or ACCEPTED vs MATCHED — those are staff/provider
+# workflow distinctions — so this collapses them to the four stages the
+# portal UI actually steps through, plus the terminal outcomes.
+_PATIENT_STAGE = {
+    MobileCareRequest.Status.PENDING: ("request_received", "Request Received"),
+    MobileCareRequest.Status.MATCHING: ("finding_therapist", "Finding Therapist"),
+    MobileCareRequest.Status.PROVIDER_OFFERED: ("finding_therapist", "Finding Therapist"),
+    MobileCareRequest.Status.MATCHED: ("therapist_matched", "Therapist Matched"),
+    MobileCareRequest.Status.ACCEPTED: ("therapist_matched", "Therapist Matched"),
+    MobileCareRequest.Status.SCHEDULED: ("visit_scheduled", "Visit Scheduled"),
+    MobileCareRequest.Status.IN_PROGRESS: ("visit_in_progress", "Visit In Progress"),
+    MobileCareRequest.Status.COMPLETED: ("visit_completed", "Visit Completed"),
+    MobileCareRequest.Status.DECLINED: ("unable_to_match", "Unable to Match"),
+    MobileCareRequest.Status.CANCELLED: ("cancelled", "Cancelled"),
+    MobileCareRequest.Status.EXPIRED: ("expired", "Request Expired"),
+}
+
+# A fixed, general set of pre-visit instructions shown once a visit is
+# scheduled — not stored per-request (no per-visit customization exists
+# yet), just a constant default so the portal has something concrete to
+# show for "General instructions" rather than nothing.
+_HOME_VISIT_GENERAL_INSTRUCTIONS = (
+    "Please make sure your provider has clear access to your front door and a space to work. "
+    "Have a chair or firm surface available, and keep pets secured during the visit."
+)
+
+
+def _serialize_portal_mobile_care_request(entry: MobileCareRequest) -> dict:
+    stage, stage_label = _PATIENT_STAGE.get(entry.status, (entry.status, entry.get_status_display()))
+    appointment = entry.appointment if entry.appointment_id else None
+    # "Provider is on the way" for the patient means a derived minutes-away
+    # figure, never raw coordinates or a ping history (see
+    # care/mobile_care.py:estimate_assignment_arrival and
+    # ProviderLocationSession's docstring) — this is the only place that
+    # information reaches the portal.
+    provider_travel_status = None
+    estimated_minutes_away = None
+    en_route_assignment = entry.assignments.filter(status=HomeVisitAssignment.Status.EN_ROUTE).first() if appointment else None
+    if en_route_assignment is not None:
+        provider_travel_status = "en_route"
+        arrival = estimate_assignment_arrival(en_route_assignment)
+        if arrival.available:
+            estimated_minutes_away = arrival.estimated_drive_minutes
+    # Same estimate staff see (care/mobile_care_billing.py) — only when
+    # billing is enabled for this organization, matching every other
+    # billing-adjacent portal surface (statements/superbills/payments).
+    billing_estimate = None
+    if organization_has_feature(entry.organization, "billing"):
+        billing_estimate = serialize_home_visit_billing_estimate(estimate_home_visit_charges(entry))
+    return {
+        "id": str(entry.pk),
+        "status": entry.status,
+        "statusLabel": entry.get_status_display(),
+        "stage": stage,
+        "stageLabel": stage_label,
+        "addressLine1": entry.address_line_1,
+        "addressLine2": entry.address_line_2,
+        "city": entry.city,
+        "state": entry.state,
+        "zipCode": entry.zip_code,
+        "reasonForVisit": entry.reason_for_visit,
+        "notes": entry.notes,
+        "earliestDate": entry.earliest_date.isoformat(),
+        "latestDate": entry.latest_date.isoformat() if entry.latest_date else None,
+        "preferredTimeWindow": entry.preferred_time_window,
+        "preferredTimeWindowLabel": entry.get_preferred_time_window_display() if entry.preferred_time_window else None,
+        "requestedService": entry.requested_service,
+        "requestedServiceLabel": entry.get_requested_service_display() if entry.requested_service else None,
+        "specialtyRequested": entry.specialty_requested,
+        "primaryCondition": entry.primary_condition,
+        "providerGenderPreference": entry.provider_gender_preference,
+        "isNewPatient": entry.is_new_patient,
+        "paymentMethod": entry.payment_method,
+        "mobilityNotes": entry.mobility_notes,
+        "homeAccessNotes": entry.home_access_notes,
+        "canEdit": entry.status in EDITABLE_REQUEST_STATUSES,
+        "canCancel": entry.status in CANCELLABLE_REQUEST_STATUSES,
+        # Deliberately minimal, patient-appropriate provider info once
+        # matched — name/credentials/specialty only, the same public-facing
+        # subset the online booking page already shows. No internal match
+        # score, ranking reasons, license detail, or account status ever
+        # reaches the portal — those stay staff/provider-only
+        # (care/api/mobile_care.py's ProviderMatch serializers).
+        "matchedProviderName": (
+            f"{entry.matched_provider.first_name} {entry.matched_provider.last_name}".strip()
+            if entry.matched_provider_id
+            else None
+        ),
+        "matchedProviderCredentials": entry.matched_provider.credentials if entry.matched_provider_id else None,
+        "matchedProviderSpecialty": entry.matched_provider.specialty if entry.matched_provider_id else None,
+        "appointmentId": str(entry.appointment_id) if entry.appointment_id else None,
+        "appointmentStartsAt": appointment.starts_at.isoformat() if appointment else None,
+        "appointmentEndsAt": appointment.ends_at.isoformat() if appointment else None,
+        "visitInstructions": _HOME_VISIT_GENERAL_INSTRUCTIONS if appointment else None,
+        "providerTravelStatus": provider_travel_status,
+        "estimatedMinutesAway": estimated_minutes_away,
+        "billingEstimate": billing_estimate,
+        "createdAt": entry.created_at.isoformat(),
+    }
+
+
+@require_http_methods(["GET", "POST"])
+@api_login_required
+def portal_mobile_care_requests(request):
+    patient, error = portal_patient_or_error(request)
+    if error:
+        return error
+    if not is_mobile_care_enabled(patient.organization):
+        return api_error("In-home PT is not enabled for this organization. Contact your clinic.", status=403)
+
+    if request.method == "GET":
+        entries = (
+            MobileCareRequest.objects.filter(patient=patient)
+            .select_related("matched_provider", "appointment")
+            .order_by("-created_at")
+        )
+        return JsonResponse({"requests": [_serialize_portal_mobile_care_request(entry) for entry in entries]})
+
+    try:
+        payload = json_body(request)
+    except InvalidJSON as exc:
+        return api_error(str(exc), status=400)
+
+    address_line_1 = str(payload.get("addressLine1", "")).strip()
+    city = str(payload.get("city", "")).strip()
+    state = str(payload.get("state", "")).strip()
+    zip_code = str(payload.get("zipCode", "")).strip()
+    earliest_date = parse_date(str(payload.get("earliestDate", "")))
+    if not address_line_1 or not city or not state or not zip_code:
+        return api_validation_error({"address": "Enter the full address for the visit."})
+    if not earliest_date:
+        return api_validation_error({"earliestDate": "Choose the earliest date you're available."})
+    latest_date = None
+    if payload.get("latestDate"):
+        latest_date = parse_date(str(payload["latestDate"]))
+        if not latest_date:
+            return api_validation_error({"latestDate": "Choose a valid latest date."})
+
+    # Optional descriptive fields — same whitelist as the staff-side create
+    # endpoint (care/api/mobile_care.py), just validated inline to match
+    # this module's own convention rather than importing that file's helper.
+    requested_service = str(payload.get("requestedService", "")).strip()
+    if requested_service and requested_service not in MobileCareRequest.RequestedService.values:
+        return api_validation_error({"requestedService": "Choose a supported requested service."})
+    preferred_time_window = str(payload.get("preferredTimeWindow", "")).strip()
+    if preferred_time_window and preferred_time_window not in MobileCareRequest.TimeWindow.values:
+        return api_validation_error({"preferredTimeWindow": "Choose a supported time window."})
+    provider_gender_preference = str(payload.get("providerGenderPreference", "")).strip() or MobileCareRequest.GenderPreference.NO_PREFERENCE
+    if provider_gender_preference not in MobileCareRequest.GenderPreference.values:
+        return api_validation_error({"providerGenderPreference": "Choose a supported gender preference."})
+    payment_method = str(payload.get("paymentMethod", "")).strip() or MobileCareRequest.PaymentMethod.INSURANCE
+    if payment_method not in MobileCareRequest.PaymentMethod.values:
+        return api_validation_error({"paymentMethod": "Choose a supported payment method."})
+
+    try:
+        entry = create_request(
+            patient,
+            source=MobileCareRequest.Source.PATIENT_PORTAL,
+            address_line_1=address_line_1[:200],
+            address_line_2=str(payload.get("addressLine2", "")).strip()[:200],
+            city=city[:120],
+            state=state[:80],
+            zip_code=zip_code[:5],
+            reason_for_visit=str(payload.get("reasonForVisit", "")).strip()[:240],
+            notes=str(payload.get("notes", "")).strip()[:500],
+            earliest_date=earliest_date,
+            latest_date=latest_date,
+            requested_service=requested_service,
+            specialty_requested=str(payload.get("specialtyRequested", "")).strip()[:120],
+            preferred_time_window=preferred_time_window,
+            primary_condition=str(payload.get("primaryCondition", "")).strip()[:240],
+            provider_gender_preference=provider_gender_preference,
+            is_new_patient=bool(payload.get("isNewPatient")),
+            payment_method=payment_method,
+            mobility_notes=str(payload.get("mobilityNotes", "")).strip()[:500],
+            home_access_notes=str(payload.get("homeAccessNotes", "")).strip()[:500],
+            created_by=patient.portal_user,
+            django_request=request,
+        )
+    except ValidationError as exc:
+        return api_validation_error(exc.message_dict if hasattr(exc, "message_dict") else {"nonFieldErrors": exc.messages})
+    return JsonResponse({"request": _serialize_portal_mobile_care_request(entry)}, status=201)
+
+
+@require_http_methods(["GET", "PATCH"])
+@api_login_required
+def portal_mobile_care_request_detail(request, request_id):
+    """The patient's own request detail, and edit-before-assignment — same
+    EDITABLE_REQUEST_STATUSES rule the staff-side edit endpoint uses."""
+    patient, error = portal_patient_or_error(request)
+    if error:
+        return error
+    if not is_mobile_care_enabled(patient.organization):
+        return api_error("In-home PT is not enabled for this organization. Contact your clinic.", status=403)
+    entry = MobileCareRequest.objects.filter(pk=request_id, patient=patient).select_related("matched_provider", "appointment").first()
+    if entry is None:
+        return api_error("Request was not found.", status=404)
+
+    if request.method == "GET":
+        return JsonResponse({"request": _serialize_portal_mobile_care_request(entry)})
+
+    try:
+        payload = json_body(request)
+    except InvalidJSON as exc:
+        return api_error(str(exc), status=400)
+
+    fields: dict = {}
+    for camel, snake, limit in (
+        ("addressLine1", "address_line_1", 200),
+        ("addressLine2", "address_line_2", 200),
+        ("city", "city", 120),
+        ("state", "state", 80),
+        ("zipCode", "zip_code", 5),
+        ("reasonForVisit", "reason_for_visit", 240),
+        ("notes", "notes", 500),
+        ("specialtyRequested", "specialty_requested", 120),
+        ("primaryCondition", "primary_condition", 240),
+        ("mobilityNotes", "mobility_notes", 500),
+        ("homeAccessNotes", "home_access_notes", 500),
+    ):
+        if camel in payload:
+            fields[snake] = str(payload.get(camel) or "").strip()[:limit]
+    if "earliestDate" in payload:
+        parsed = parse_date(str(payload.get("earliestDate", "")))
+        if parsed is None:
+            return api_validation_error({"earliestDate": "Choose a valid date."})
+        fields["earliest_date"] = parsed
+    if "latestDate" in payload:
+        value = payload.get("latestDate")
+        fields["latest_date"] = parse_date(str(value)) if value else None
+        if value and fields["latest_date"] is None:
+            return api_validation_error({"latestDate": "Choose a valid date."})
+    if "requestedService" in payload:
+        value = str(payload.get("requestedService") or "")
+        if value and value not in MobileCareRequest.RequestedService.values:
+            return api_validation_error({"requestedService": "Choose a supported requested service."})
+        fields["requested_service"] = value
+    if "preferredTimeWindow" in payload:
+        value = str(payload.get("preferredTimeWindow") or "")
+        if value and value not in MobileCareRequest.TimeWindow.values:
+            return api_validation_error({"preferredTimeWindow": "Choose a supported time window."})
+        fields["preferred_time_window"] = value
+    if "providerGenderPreference" in payload:
+        value = str(payload.get("providerGenderPreference") or MobileCareRequest.GenderPreference.NO_PREFERENCE)
+        if value not in MobileCareRequest.GenderPreference.values:
+            return api_validation_error({"providerGenderPreference": "Choose a supported gender preference."})
+        fields["provider_gender_preference"] = value
+    if "paymentMethod" in payload:
+        value = str(payload.get("paymentMethod") or MobileCareRequest.PaymentMethod.INSURANCE)
+        if value not in MobileCareRequest.PaymentMethod.values:
+            return api_validation_error({"paymentMethod": "Choose a supported payment method."})
+        fields["payment_method"] = value
+    if "isNewPatient" in payload:
+        fields["is_new_patient"] = bool(payload.get("isNewPatient"))
+
+    try:
+        update_request(entry, fields, actor=patient.portal_user, django_request=request)
+    except ValidationError as exc:
+        return api_validation_error(exc.message_dict if hasattr(exc, "message_dict") else {"nonFieldErrors": exc.messages})
+    return JsonResponse({"request": _serialize_portal_mobile_care_request(entry)})
+
+
+@require_POST
+@api_login_required
+def portal_mobile_care_request_cancel(request, request_id):
+    patient, error = portal_patient_or_error(request)
+    if error:
+        return error
+    if not is_mobile_care_enabled(patient.organization):
+        return api_error("In-home PT is not enabled for this organization. Contact your clinic.", status=403)
+    try:
+        entry = cancel_portal_request(patient, request_id, django_request=request)
+    except MobileCareRequest.DoesNotExist:
+        return api_error("Request was not found.", status=404)
+    except ValidationError as exc:
+        message = exc.messages[0] if exc.messages else "This request can no longer be cancelled."
+        return api_error(message, status=409)
+    return JsonResponse({"request": _serialize_portal_mobile_care_request(entry)})
 
 
 # --- Patient: digital intake / forms engine ---------------------------------
@@ -1340,6 +1640,7 @@ def _serialize_patient_payment(payment: PatientPayment) -> dict:
         "statusLabel": payment.get_status_display(),
         "attemptedAt": payment.attempted_at.isoformat(),
         "message": payment.failure_message,
+        "mobileCareRequestId": str(payment.mobile_care_request_id) if payment.mobile_care_request_id else None,
     }
 
 
@@ -1421,7 +1722,17 @@ def portal_payment_charge(request):
     if amount <= 0:
         return api_validation_error({"amount": "Enter an amount greater than zero."})
 
-    payment = PatientPayment(patient=patient, amount=amount)
+    # Optional — e.g. a Mobile Care deposit or self-pay visit payment. Same
+    # IDOR posture as every other portal lookup: resolved only from this
+    # patient's own requests, never trusted to already belong to them.
+    mobile_care_request = None
+    mobile_care_request_id = payload.get("mobileCareRequestId")
+    if mobile_care_request_id:
+        mobile_care_request = MobileCareRequest.objects.filter(pk=mobile_care_request_id, patient=patient).first()
+        if mobile_care_request is None:
+            return api_error("Request was not found.", status=404)
+
+    payment = PatientPayment(patient=patient, amount=amount, mobile_care_request=mobile_care_request)
     try:
         payment.full_clean()
         payment.save()
@@ -1503,6 +1814,7 @@ def _serialize_profile(patient: Patient) -> dict:
         "pharmacyAddress": patient.pharmacy_address,
         "preferredContactMethod": patient.preferred_contact_method,
         "emailNotificationsEnabled": patient.email_notifications_enabled,
+        "smsNotificationsEnabled": patient.sms_notifications_enabled,
         "pendingChangeRequest": _serialize_profile_change_request(pending) if pending else None,
     }
 
@@ -1558,6 +1870,9 @@ def portal_profile_preferences(request):
     if "emailNotificationsEnabled" in payload:
         patient.email_notifications_enabled = bool(payload["emailNotificationsEnabled"])
         changed_fields.append("email_notifications_enabled")
+    if "smsNotificationsEnabled" in payload:
+        patient.sms_notifications_enabled = bool(payload["smsNotificationsEnabled"])
+        changed_fields.append("sms_notifications_enabled")
 
     if not changed_fields:
         return api_validation_error({"detail": "No recognized fields were provided."})

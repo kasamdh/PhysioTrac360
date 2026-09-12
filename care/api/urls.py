@@ -1,7 +1,7 @@
 from django.urls import path
 
 from .. import views as legacy_views
-from . import admin_config, billing, documents, note_views, patient_portal, public_booking, user_licenses, views, workflow_views, super_admin
+from . import admin_config, billing, documents, mobile_care, mobile_care_settings, note_views, patient_portal, public_booking, user_licenses, views, workflow_views, super_admin
 
 
 urlpatterns = [
@@ -191,6 +191,17 @@ urlpatterns = [
         "portal/waitlist/<uuid:entry_id>/leave/",
         patient_portal.portal_waitlist_leave,
         name="api-portal-waitlist-leave",
+    ),
+    path("portal/mobile-care-requests/", patient_portal.portal_mobile_care_requests, name="api-portal-mobile-care-requests"),
+    path(
+        "portal/mobile-care-requests/<uuid:request_id>/",
+        patient_portal.portal_mobile_care_request_detail,
+        name="api-portal-mobile-care-request-detail",
+    ),
+    path(
+        "portal/mobile-care-requests/<uuid:request_id>/cancel/",
+        patient_portal.portal_mobile_care_request_cancel,
+        name="api-portal-mobile-care-request-cancel",
     ),
     path("waitlist/", patient_portal.waitlist_staff_list, name="api-waitlist-staff-list"),
     path(
@@ -434,12 +445,140 @@ urlpatterns = [
         name="api-appointment-move",
     ),
     path("audit-events/", workflow_views.audit_events, name="api-audit-events"),
+    path("mobile-care/dashboard/", mobile_care.mobile_care_dashboard, name="api-mobile-care-dashboard"),
+    path("mobile-care/requests/", mobile_care.mobile_care_request_list, name="api-mobile-care-request-list"),
+    path(
+        "mobile-care/requests/<uuid:request_id>/",
+        mobile_care.mobile_care_request_detail,
+        name="api-mobile-care-request-detail",
+    ),
+    path(
+        "mobile-care/requests/<uuid:request_id>/cancel/",
+        mobile_care.mobile_care_request_cancel,
+        name="api-mobile-care-request-cancel",
+    ),
+    path(
+        "mobile-care/requests/<uuid:request_id>/status-history/",
+        mobile_care.mobile_care_request_status_history,
+        name="api-mobile-care-request-status-history",
+    ),
+    path(
+        "patients/<uuid:patient_id>/mobile-care-requests/",
+        mobile_care.mobile_care_request_create,
+        name="api-mobile-care-request-create",
+    ),
+    path(
+        "mobile-care/requests/<uuid:request_id>/matches/",
+        mobile_care.mobile_care_request_matches,
+        name="api-mobile-care-request-matches",
+    ),
+    path(
+        "mobile-care/requests/<uuid:request_id>/match/",
+        mobile_care.mobile_care_request_match,
+        name="api-mobile-care-request-match",
+    ),
+    path(
+        "mobile-care/requests/<uuid:request_id>/schedule/",
+        mobile_care.mobile_care_request_schedule,
+        name="api-mobile-care-request-schedule",
+    ),
+    path(
+        "mobile-care/requests/<uuid:request_id>/decline/",
+        mobile_care.mobile_care_request_decline,
+        name="api-mobile-care-request-decline",
+    ),
+    path(
+        "mobile-care/requests/<uuid:request_id>/billing-estimate/",
+        mobile_care.mobile_care_request_billing_estimate,
+        name="api-mobile-care-request-billing-estimate",
+    ),
+    path(
+        "mobile-care/requests/<uuid:request_id>/add-service-charge/",
+        mobile_care.mobile_care_request_add_service_charge,
+        name="api-mobile-care-request-add-service-charge",
+    ),
+    path(
+        "mobile-care/requests/<uuid:request_id>/add-travel-charge/",
+        mobile_care.mobile_care_request_add_travel_charge,
+        name="api-mobile-care-request-add-travel-charge",
+    ),
+    path(
+        "mobile-care/requests/<uuid:request_id>/generate-matches/",
+        mobile_care.mobile_care_request_generate_matches,
+        name="api-mobile-care-request-generate-matches",
+    ),
+    path(
+        "mobile-care/requests/<uuid:request_id>/provider-matches/",
+        mobile_care.mobile_care_request_provider_matches,
+        name="api-mobile-care-request-provider-matches",
+    ),
+    path("mobile-care/my-offers/", mobile_care.provider_my_offers, name="api-mobile-care-my-offers"),
+    path("mobile-care/matches/<uuid:match_id>/offer/", mobile_care.provider_match_offer, name="api-mobile-care-match-offer"),
+    path("mobile-care/matches/<uuid:match_id>/respond/", mobile_care.provider_match_respond, name="api-mobile-care-match-respond"),
+    path("mobile-care/my-assignments/", mobile_care.provider_my_assignments, name="api-mobile-care-my-assignments"),
+    path("mobile-care/my-assignments/today/", mobile_care.provider_todays_home_visits, name="api-mobile-care-my-assignments-today"),
+    path("mobile-care/assignments/<uuid:assignment_id>/schedule/", mobile_care.assignment_schedule, name="api-mobile-care-assignment-schedule"),
+    path(
+        "mobile-care/assignments/<uuid:assignment_id>/status/",
+        mobile_care.assignment_status_update,
+        name="api-mobile-care-assignment-status",
+    ),
+    path(
+        "mobile-care/assignments/<uuid:assignment_id>/travel-log/",
+        mobile_care.assignment_travel_log,
+        name="api-mobile-care-assignment-travel-log",
+    ),
+    path(
+        "mobile-care/assignments/<uuid:assignment_id>/delay/",
+        mobile_care.assignment_log_delay,
+        name="api-mobile-care-assignment-delay",
+    ),
+    path(
+        "mobile-care/assignments/<uuid:assignment_id>/location/",
+        mobile_care.assignment_record_location,
+        name="api-mobile-care-assignment-location",
+    ),
+    path(
+        "mobile-care/my-location-sharing/",
+        mobile_care.provider_location_sharing_update,
+        name="api-mobile-care-my-location-sharing",
+    ),
+    path("mobile-care/my-queue/", mobile_care.home_visit_queue_list, name="api-mobile-care-my-queue"),
+    path("mobile-care/directions/", mobile_care.mobile_care_directions, name="api-mobile-care-directions"),
+    path(
+        "mobile-care/configuration/",
+        mobile_care_settings.mobile_care_configuration,
+        name="api-mobile-care-configuration",
+    ),
+    path("mobile-care/providers/", mobile_care.provider_options, name="api-mobile-care-providers"),
+    path("mobile-care/availability/", mobile_care.home_visit_availability_list, name="api-mobile-care-availability-list"),
+    path(
+        "mobile-care/availability/<uuid:availability_id>/",
+        mobile_care.home_visit_availability_detail,
+        name="api-mobile-care-availability-detail",
+    ),
+    path("mobile-care/service-areas/", mobile_care.service_areas, name="api-mobile-care-service-areas"),
+    path(
+        "mobile-care/service-areas/<uuid:service_area_id>/",
+        mobile_care.service_area_detail,
+        name="api-mobile-care-service-area-detail",
+    ),
+    path(
+        "mobile-care/visits/<uuid:appointment_id>/status/",
+        mobile_care.home_visit_status_update,
+        name="api-mobile-care-visit-status",
+    ),
     path("super-admin/dashboard/", super_admin.dashboard, name="api-super-admin-dashboard"),
     path("super-admin/credentials/", super_admin.credential_dashboard, name="api-super-admin-credentials"),
     path("super-admin/features/", super_admin.features, name="api-super-admin-features"),
     path("super-admin/plans/", super_admin.plans, name="api-super-admin-plans"),
     path("super-admin/clients/<int:client_number>/subscription/", super_admin.client_subscription, name="api-super-admin-client-subscription"),
     path("super-admin/clients/", super_admin.clients, name="api-super-admin-clients"),
+    path(
+        "super-admin/mobile-care/platform-defaults/",
+        super_admin.mobile_care_platform_defaults,
+        name="api-super-admin-mobile-care-platform-defaults",
+    ),
     path("super-admin/users/", super_admin.all_users, name="api-super-admin-users"),
     path("super-admin/users/<uuid:user_id>/", super_admin.user_detail, name="api-super-admin-user-detail"),
     path("super-admin/users/<uuid:user_id>/status-action/", super_admin.user_status_action, name="api-super-admin-user-status-action"),
@@ -468,6 +607,11 @@ urlpatterns = [
     path("super-admin/clients/<int:client_number>/privileged-access/<uuid:grant_id>/revoke/", super_admin.privileged_access_revoke, name="api-super-admin-privileged-access-revoke"),
     path("super-admin/clients/<int:client_number>/privileged-patients/", super_admin.privileged_patients, name="api-super-admin-privileged-patients"),
     path("super-admin/clients/<int:client_number>/privileged-patients/<uuid:patient_id>/", super_admin.privileged_patient_detail, name="api-super-admin-privileged-patient-detail"),
+    path(
+        "super-admin/clients/<int:client_number>/privileged-mobile-care/",
+        super_admin.privileged_mobile_care_dashboard,
+        name="api-super-admin-privileged-mobile-care-dashboard",
+    ),
     path("super-admin/clients/<int:client_number>/admin/resend-invite/", super_admin.resend_admin_invitation, name="api-super-admin-client-admin-resend-invite"),
     path("super-admin/clients/<int:client_number>/<str:action>/", super_admin.client_status, name="api-super-admin-client-status"),
     path("auth/activate-invitation/", super_admin.activate_invitation, name="api-activate-invitation"),

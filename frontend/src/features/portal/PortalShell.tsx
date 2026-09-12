@@ -2,12 +2,13 @@ import type { ReactNode } from "react";
 
 import type { WorkspaceUser } from "../../api/types";
 
-export type PortalPage = "dashboard" | "appointments" | "book" | "waitlist" | "forms" | "documents" | "hep" | "outcomes" | "messages" | "payments" | "profile";
+export type PortalPage = "dashboard" | "appointments" | "book" | "mobile-care" | "waitlist" | "forms" | "documents" | "hep" | "outcomes" | "messages" | "payments" | "profile";
 
 const NAV_ITEMS: { key: PortalPage; label: string }[] = [
   { key: "dashboard", label: "Home" },
   { key: "appointments", label: "My Appointments" },
   { key: "book", label: "Book a Visit" },
+  { key: "mobile-care", label: "In-Home PT" },
   { key: "forms", label: "Forms" },
   { key: "documents", label: "Documents" },
   { key: "hep", label: "My Exercises" },

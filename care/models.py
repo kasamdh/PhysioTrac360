@@ -311,6 +311,11 @@ class Provider(UUIDTimeStampedModel):
     npi_number = models.CharField(max_length=30, blank=True)
     is_active = models.BooleanField(default=True)
     online_booking_enabled = models.BooleanField(default=True)
+    location_sharing_enabled = models.BooleanField(
+        default=False,
+        help_text="Explicit opt-in for live GPS location capture during a home-visit assignment's travel segment. "
+        "Off by default — enabling this is a separate, deliberate action from account/employment consent.",
+    )
     bio = models.TextField(blank=True)
     locations = models.ManyToManyField(Location, blank=True, related_name="providers")
 
@@ -548,6 +553,601 @@ class Waitlist(UUIDTimeStampedModel):
 
     def __str__(self) -> str:
         return f"{self.patient} waitlist entry — {self.get_status_display()}"
+
+
+_ZIP_CODE_VALIDATOR = RegexValidator(regex=r"^\d{5}$", message="Enter a 5-digit ZIP code.")
+
+
+class ServiceArea(UUIDTimeStampedModel):
+    """A provider's declared coverage zone for in-home visits. Supports two,
+    independent ways to describe the zone, additive to each other:
+      - an explicit named set of ZIP codes (see ServiceAreaZipCode) — what
+        matching_providers() reads today;
+      - a center-point description (`primary_zip_code`/`city`/`state`) plus
+        `radius_miles`/`max_travel_distance_miles` — no geocoding provider is
+        connected in this codebase, so these are descriptive/eligibility
+        fields only for now, not resolved into an actual radius query.
+    A provider may have more than one zone (e.g. separate weekday/weekend
+    coverage, or a tighter radius for a second office), mirroring the
+    existing one-provider-to-many-ProviderAvailability-rows pattern above."""
+
+    organization = models.ForeignKey(Organization, on_delete=models.PROTECT, related_name="service_areas")
+    provider = models.ForeignKey(Provider, on_delete=models.CASCADE, related_name="service_areas")
+    name = models.CharField(max_length=120)
+    primary_zip_code = models.CharField(max_length=5, blank=True, validators=[_ZIP_CODE_VALIDATOR])
+    city = models.CharField(max_length=120, blank=True)
+    state = models.CharField(max_length=80, blank=True)
+    radius_miles = models.PositiveSmallIntegerField(null=True, blank=True)
+    max_travel_distance_miles = models.PositiveSmallIntegerField(null=True, blank=True)
+    # Cached geocode of this area's declared origin (primary_zip_code/city/
+    # state) — NEVER a provider's home address, since this app stores no
+    # such thing. Null until care/mobile_care.py's geocode_service_area()
+    # actually resolves one via care/mapping.py's GeocodingService; with no
+    # geocoding provider connected today, that stays null indefinitely.
+    latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="created_service_areas"
+    )
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="updated_service_areas"
+    )
+
+    class Meta:
+        ordering = ["provider", "name"]
+        indexes = [models.Index(fields=["organization", "provider", "is_active"])]
+        constraints = [
+            models.UniqueConstraint(fields=["provider", "name"], name="unique_service_area_name_per_provider")
+        ]
+
+    def clean(self):
+        # Local import — see MobileCareConfiguration.clean()'s docstring for
+        # why care/mobile_care_settings.py is deferred rather than imported
+        # at module load time here.
+        from .mobile_care_settings import effective_max_travel_radius_miles
+
+        errors = {}
+        if self.provider_id and self.organization_id and self.provider.organization_id != self.organization_id:
+            errors["provider"] = "Provider must belong to this organization."
+        if self.radius_miles is not None and self.radius_miles <= 0:
+            errors["radius_miles"] = "Service radius must be greater than zero."
+        if self.max_travel_distance_miles is not None and self.max_travel_distance_miles <= 0:
+            errors["max_travel_distance_miles"] = "Maximum travel distance must be greater than zero."
+        if self.organization_id:
+            max_radius = effective_max_travel_radius_miles(self.organization)
+            if self.radius_miles is not None and self.radius_miles > max_radius:
+                errors["radius_miles"] = f"Service radius cannot exceed this organization's configured maximum of {max_radius} miles."
+            if self.max_travel_distance_miles is not None and self.max_travel_distance_miles > max_radius:
+                errors["max_travel_distance_miles"] = f"Maximum travel distance cannot exceed this organization's configured maximum of {max_radius} miles."
+        if errors:
+            raise ValidationError(errors)
+
+    def __str__(self) -> str:
+        return f"{self.provider} — {self.name}"
+
+
+class ServiceAreaZipCode(models.Model):
+    """One covered ZIP code within a ServiceArea. Kept as its own indexed
+    table (rather than a JSONField list) so "which providers cover ZIP
+    X" is a plain indexed lookup, not an application-side scan — the same
+    reasoning as ProviderAppointmentType being a table instead of a list on
+    Provider."""
+
+    service_area = models.ForeignKey(ServiceArea, on_delete=models.CASCADE, related_name="zip_codes")
+    zip_code = models.CharField(max_length=5, validators=[_ZIP_CODE_VALIDATOR])
+
+    class Meta:
+        ordering = ["zip_code"]
+        constraints = [
+            models.UniqueConstraint(fields=["service_area", "zip_code"], name="unique_zip_per_service_area")
+        ]
+        indexes = [models.Index(fields=["zip_code"])]
+
+    def __str__(self) -> str:
+        return self.zip_code
+
+
+class HomeVisitAvailability(UUIDTimeStampedModel):
+    """When a provider is available (or explicitly not) for in-home visits —
+    the mobile-care counterpart to ProviderAvailability, which it
+    deliberately does not reuse: ProviderAvailability's `location` is a
+    required clinic site and its rows are always recurring weekly windows
+    with no status concept, none of which fit a home-visit provider's
+    schedule (no fixed site, may be one-time, may need to mark a window
+    UNAVAILABLE/BLOCKED rather than only ever being a positive window).
+    Reuses ProviderAvailability.Weekday for day-of-week and ServiceArea for
+    the optional region, rather than duplicating either.
+
+    Purely a data-entry surface for now — matching_providers() does not read
+    this yet (see care/mobile_care.py's module docstring)."""
+
+    class AvailabilityType(models.TextChoices):
+        AVAILABLE = "available", "Available"
+        UNAVAILABLE = "unavailable", "Unavailable"
+        BLOCKED = "blocked", "Blocked"
+
+    organization = models.ForeignKey(Organization, on_delete=models.PROTECT, related_name="home_visit_availabilities")
+    provider = models.ForeignKey(Provider, on_delete=models.CASCADE, related_name="home_visit_availabilities")
+    availability_type = models.CharField(max_length=16, choices=AvailabilityType.choices, default=AvailabilityType.AVAILABLE)
+    is_recurring = models.BooleanField(
+        default=True, help_text="Recurring: applies every `day_of_week`. One-time: applies only on `specific_date`."
+    )
+    day_of_week = models.PositiveSmallIntegerField(
+        choices=ProviderAvailability.Weekday.choices, null=True, blank=True,
+        help_text="Required when is_recurring is set; ignored for a one-time entry.",
+    )
+    specific_date = models.DateField(
+        null=True, blank=True, help_text="Required when is_recurring is not set; ignored for a recurring entry."
+    )
+    start_time = models.TimeField()
+    end_time = models.TimeField()
+    service_area = models.ForeignKey(
+        ServiceArea, on_delete=models.SET_NULL, null=True, blank=True, related_name="home_visit_availabilities",
+        help_text="Optional — the region this window applies to, if it differs from the provider's general coverage.",
+    )
+    effective_from = models.DateField(null=True, blank=True)
+    effective_until = models.DateField(null=True, blank=True)
+    notes = models.CharField(max_length=500, blank=True)
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="created_home_visit_availabilities"
+    )
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="updated_home_visit_availabilities"
+    )
+
+    class Meta:
+        ordering = ["provider", "is_recurring", "day_of_week", "specific_date", "start_time"]
+        indexes = [
+            models.Index(fields=["organization", "provider", "is_active"]),
+            models.Index(fields=["provider", "day_of_week"]),
+            models.Index(fields=["provider", "specific_date"]),
+        ]
+
+    def clean(self):
+        errors = {}
+        if self.provider_id and self.organization_id and self.provider.organization_id != self.organization_id:
+            errors["provider"] = "Provider must belong to this organization."
+        if self.service_area_id:
+            if self.service_area.provider_id != self.provider_id:
+                errors["service_area"] = "Service area must belong to the same provider."
+            elif self.organization_id and self.service_area.organization_id != self.organization_id:
+                errors["service_area"] = "Service area must belong to this organization."
+        if self.is_recurring:
+            if self.day_of_week is None:
+                errors["day_of_week"] = "Choose a day of week for a recurring window."
+            if self.specific_date is not None:
+                errors["specific_date"] = "A recurring window should not have a specific date."
+        else:
+            if self.specific_date is None:
+                errors["specific_date"] = "Choose a date for a one-time window."
+            if self.day_of_week is not None:
+                errors["day_of_week"] = "A one-time window should not have a day of week."
+        if self.start_time and self.end_time and self.end_time <= self.start_time:
+            errors["end_time"] = "End time must be after start time."
+        if self.effective_from and self.effective_until and self.effective_until < self.effective_from:
+            errors["effective_until"] = "End date cannot precede the start date."
+        if errors:
+            raise ValidationError(errors)
+
+    def __str__(self) -> str:
+        when = self.get_day_of_week_display() if self.is_recurring else str(self.specific_date)
+        return f"{self.provider} · {when} {self.start_time}-{self.end_time} ({self.get_availability_type_display()})"
+
+
+class MobileCareRequest(UUIDTimeStampedModel):
+    """A patient's request to be seen for in-home PT — the mobile-care
+    counterpart to Waitlist, which it deliberately mirrors: patient-supplied
+    preferences, staff (or, later, algorithmic) fulfillment, insert-only
+    status history via the append-only AuditEvent trail rather than storing
+    a log on this row. Distinct from Waitlist because a home-visit request
+    carries a service address ZIP (for provider matching) that a clinic
+    waitlist entry has no use for.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Requested"
+        MATCHING = "matching", "Matching"
+        PROVIDER_OFFERED = "provider_offered", "Offered to provider"
+        MATCHED = "matched", "Matched"
+        ACCEPTED = "accepted", "Accepted"
+        SCHEDULED = "scheduled", "Scheduled"
+        IN_PROGRESS = "in_progress", "In progress"
+        COMPLETED = "completed", "Completed"
+        DECLINED = "declined", "Declined"
+        CANCELLED = "cancelled", "Cancelled"
+        EXPIRED = "expired", "Expired"
+
+    class Source(models.TextChoices):
+        PATIENT_PORTAL = "patient_portal", "Patient portal"
+        FRONT_DESK = "front_desk", "Front desk"
+
+    class RequestedService(models.TextChoices):
+        EVALUATION = "evaluation", "Initial evaluation"
+        FOLLOW_UP = "follow_up", "Follow-up visit"
+        PROGRESS = "progress", "Progress visit"
+        DISCHARGE = "discharge", "Discharge visit"
+
+    class TimeWindow(models.TextChoices):
+        MORNING = "morning", "Morning (8am–12pm)"
+        AFTERNOON = "afternoon", "Afternoon (12pm–5pm)"
+        EVENING = "evening", "Evening (5pm–9pm)"
+        ANY = "any", "Any time"
+
+    class GenderPreference(models.TextChoices):
+        NO_PREFERENCE = "no_preference", "No preference"
+        MALE = "male", "Male"
+        FEMALE = "female", "Female"
+
+    class PaymentMethod(models.TextChoices):
+        INSURANCE = "insurance", "Insurance"
+        SELF_PAY = "self_pay", "Self-pay"
+        PACKAGE = "package", "Package/Membership"
+
+    organization = models.ForeignKey(Organization, on_delete=models.PROTECT, related_name="mobile_care_requests")
+    patient = models.ForeignKey("Patient", on_delete=models.PROTECT, related_name="mobile_care_requests")
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
+    source = models.CharField(max_length=16, choices=Source.choices, default=Source.FRONT_DESK)
+
+    # Deliberately no patient-demographic fields here (name/DOB/etc. already
+    # live on Patient, reached via the `patient` FK) — only the visit
+    # address, which is allowed to differ from the patient's chart address
+    # (see create_request()'s "copy from chart, then let staff/patient
+    # override" behavior in care/mobile_care.py).
+    address_line_1 = models.CharField(max_length=200)
+    address_line_2 = models.CharField(max_length=200, blank=True)
+    city = models.CharField(max_length=120)
+    state = models.CharField(max_length=80)
+    zip_code = models.CharField(max_length=5, validators=[_ZIP_CODE_VALIDATOR])
+    # Cached geocode of the visit address above — set by
+    # care/mobile_care.py's geocode_mobile_care_request() via
+    # care/mapping.py's GeocodingService, so a real integration only ever
+    # geocodes a given address once. Null until a geocoding provider is
+    # actually connected (none is, today).
+    latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+
+    reason_for_visit = models.CharField(max_length=240, blank=True)
+    notes = models.CharField(max_length=500, blank=True)
+    earliest_date = models.DateField()
+    latest_date = models.DateField(null=True, blank=True)
+    preferred_time_window = models.CharField(max_length=16, choices=TimeWindow.choices, blank=True)
+
+    requested_service = models.CharField(max_length=20, choices=RequestedService.choices, blank=True)
+    specialty_requested = models.CharField(max_length=120, blank=True)
+    primary_condition = models.CharField(max_length=240, blank=True)
+    provider_gender_preference = models.CharField(
+        max_length=16, choices=GenderPreference.choices, default=GenderPreference.NO_PREFERENCE
+    )
+    is_new_patient = models.BooleanField(default=False)
+    payment_method = models.CharField(max_length=16, choices=PaymentMethod.choices, default=PaymentMethod.INSURANCE)
+    mobility_notes = models.CharField(max_length=500, blank=True)
+    home_access_notes = models.CharField(max_length=500, blank=True)
+
+    preferred_provider = models.ForeignKey(
+        Provider, on_delete=models.SET_NULL, null=True, blank=True, related_name="preferred_mobile_care_requests"
+    )
+    matched_provider = models.ForeignKey(
+        Provider, on_delete=models.SET_NULL, null=True, blank=True, related_name="matched_mobile_care_requests"
+    )
+    episode_of_care = models.ForeignKey(
+        "EpisodeOfCare", on_delete=models.SET_NULL, null=True, blank=True, related_name="mobile_care_requests"
+    )
+    appointment = models.OneToOneField(
+        "Appointment", on_delete=models.SET_NULL, null=True, blank=True, related_name="mobile_care_request"
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="created_mobile_care_requests"
+    )
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="updated_mobile_care_requests"
+    )
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["organization", "status"]),
+            models.Index(fields=["organization", "zip_code"]),
+        ]
+
+    def clean(self):
+        errors = {}
+        if self.patient_id and self.organization_id and self.patient.organization_id != self.organization_id:
+            errors["patient"] = "Patient must belong to this organization."
+        for field_name in ("preferred_provider", "matched_provider"):
+            provider = getattr(self, field_name, None)
+            if provider is not None and self.organization_id and provider.organization_id != self.organization_id:
+                errors[field_name] = "Provider must belong to this organization."
+        if self.episode_of_care_id and self.patient_id and self.episode_of_care.patient_id != self.patient_id:
+            errors["episode_of_care"] = "Episode of care must belong to the same patient."
+        if self.appointment_id and self.patient_id and self.appointment.patient_id != self.patient_id:
+            errors["appointment"] = "Appointment must belong to the same patient."
+        if self.latest_date and self.earliest_date and self.latest_date < self.earliest_date:
+            errors["latest_date"] = "End of range cannot precede the start of the range."
+        if errors:
+            raise ValidationError(errors)
+
+    def __str__(self) -> str:
+        return f"{self.patient} — in-home PT request ({self.get_status_display()})"
+
+
+class ProviderMatch(UUIDTimeStampedModel):
+    """One candidate provider considered or offered for a MobileCareRequest —
+    turns matching_providers()'s live, stateless preview into a persisted,
+    auditable offer history, and is the prerequisite for a provider
+    explicitly accepting/declining a visit (see HomeVisitAssignment) rather
+    than staff unilaterally assigning one via MobileCareRequest.matched_provider.
+
+    Deliberately additive: MobileCareRequest.matched_provider and the
+    existing match_provider()/schedule_appointment() staff-assign flow are
+    untouched and keep working exactly as shipped. This is a second, richer
+    pipeline that can be adopted per-organization without breaking the first.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        OFFERED = "offered", "Offered"
+        ACCEPTED = "accepted", "Accepted"
+        DECLINED = "declined", "Declined"
+        EXPIRED = "expired", "Expired"
+
+    class MatchReason(models.TextChoices):
+        ZIP_COVERAGE = "zip_coverage", "ZIP coverage"
+        CONTINUITY = "continuity", "Continuity of care"
+        MANUAL = "manual", "Manual override"
+
+    organization = models.ForeignKey(Organization, on_delete=models.PROTECT, related_name="provider_matches")
+    service_request = models.ForeignKey(MobileCareRequest, on_delete=models.CASCADE, related_name="matches")
+    provider = models.ForeignKey(Provider, on_delete=models.PROTECT, related_name="service_matches")
+    rank = models.PositiveSmallIntegerField(default=1, help_text="1 = best match; supports offering candidates in order.")
+    match_reason = models.CharField(max_length=16, choices=MatchReason.choices, default=MatchReason.ZIP_COVERAGE)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
+    score = models.DecimalField(
+        max_digits=5, decimal_places=2, null=True, blank=True,
+        help_text="0-100 weighted match score at the time this candidate was ranked — see care.mobile_care.score_provider_match(). "
+        "Null for a match created outside the ranking pipeline (e.g. a future manual override).",
+    )
+    score_breakdown = models.JSONField(
+        default=dict, blank=True,
+        help_text="Sub-scores (continuity/specialty/availability/distance/preference/caseload) and human-readable "
+        "reasons behind `score` — staff/admin display only, never exposed to the patient portal.",
+    )
+    offered_at = models.DateTimeField(null=True, blank=True)
+    viewed_at = models.DateTimeField(
+        null=True, blank=True, help_text="When the offered provider first opened this offer — see care.mobile_care.mark_offer_viewed().",
+    )
+    responded_at = models.DateTimeField(null=True, blank=True)
+    decline_reason = models.CharField(max_length=240, blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="created_provider_matches"
+    )
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="updated_provider_matches"
+    )
+
+    class Meta:
+        ordering = ["service_request", "rank"]
+        constraints = [
+            models.UniqueConstraint(fields=["service_request", "provider"], name="unique_provider_match_per_request")
+        ]
+        indexes = [
+            models.Index(fields=["organization", "service_request", "status"]),
+            models.Index(fields=["provider", "status"]),
+        ]
+
+    def clean(self):
+        errors = {}
+        if self.service_request_id and self.organization_id and self.service_request.organization_id != self.organization_id:
+            errors["service_request"] = "Request must belong to this organization."
+        if self.provider_id and self.organization_id and self.provider.organization_id != self.organization_id:
+            errors["provider"] = "Provider must belong to this organization."
+        if self.responded_at and self.offered_at and self.responded_at < self.offered_at:
+            errors["responded_at"] = "Response time cannot precede the offer time."
+        if errors:
+            raise ValidationError(errors)
+
+    def __str__(self) -> str:
+        return f"{self.service_request} — {self.provider} ({self.get_status_display()})"
+
+
+class HomeVisitAssignment(UUIDTimeStampedModel):
+    """The day-of operational workflow for one accepted ProviderMatch —
+    created the moment a match is accepted, before any Appointment
+    necessarily exists yet. Deliberately a separate 1:1 detail table rather
+    than widening Appointment.Status: Appointment is the shared, platform-
+    wide "what/when/who" record for every visit type (clinic, telehealth,
+    home), and its status enum should not grow en_route/arrived states that
+    only ever apply to a home visit. `appointment` is set (and `status`
+    advances ACCEPTED -> SCHEDULED) once a time is actually chosen — only a
+    SCHEDULED assignment can start the field-day workflow
+    (SCHEDULED -> EN_ROUTE -> ARRIVED -> IN_PROGRESS -> COMPLETED, or
+    CANCELLED from any of those); `status` transitions from SCHEDULED
+    onward are mirrored onto `appointment.status` in the same transaction
+    so the two stay consistent (see care/mobile_care.py)."""
+
+    class Status(models.TextChoices):
+        OFFERED = "offered", "Offered"
+        ACCEPTED = "accepted", "Accepted"
+        DECLINED = "declined", "Declined"
+        SCHEDULED = "scheduled", "Scheduled"
+        EN_ROUTE = "en_route", "En route"
+        ARRIVED = "arrived", "Arrived"
+        IN_PROGRESS = "in_progress", "In progress"
+        COMPLETED = "completed", "Completed"
+        CANCELLED = "cancelled", "Cancelled"
+
+    organization = models.ForeignKey(Organization, on_delete=models.PROTECT, related_name="home_visit_assignments")
+    service_request = models.ForeignKey(MobileCareRequest, on_delete=models.PROTECT, related_name="assignments")
+    provider_match = models.OneToOneField(ProviderMatch, on_delete=models.PROTECT, related_name="assignment")
+    provider = models.ForeignKey(Provider, on_delete=models.PROTECT, related_name="home_visit_assignments")
+    appointment = models.OneToOneField(
+        "Appointment", on_delete=models.SET_NULL, null=True, blank=True, related_name="home_visit_assignment"
+    )
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.OFFERED)
+    accepted_at = models.DateTimeField(null=True, blank=True)
+    scheduled_at = models.DateTimeField(null=True, blank=True)
+    en_route_at = models.DateTimeField(null=True, blank=True)
+    arrived_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    cancel_reason = models.CharField(max_length=240, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="created_home_visit_assignments"
+    )
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="updated_home_visit_assignments"
+    )
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["organization", "provider", "status"]),
+            models.Index(fields=["service_request"]),
+        ]
+        constraints = [
+            # DB-level backstop against two active assignments on the same
+            # request (e.g. two providers each accepting their own offer) —
+            # the primary defense is respond_to_match()'s check at the
+            # service layer, matching Appointment's own
+            # model-constraint-as-backstop convention for its own
+            # concurrency-safe double-booking defense.
+            models.UniqueConstraint(
+                fields=["service_request"],
+                condition=Q(
+                    status__in=[
+                        "offered",
+                        "accepted",
+                        "en_route",
+                        "arrived",
+                        "in_progress",
+                    ]
+                ),
+                name="unique_active_assignment_per_request",
+            )
+        ]
+
+    def clean(self):
+        errors = {}
+        if self.service_request_id and self.organization_id and self.service_request.organization_id != self.organization_id:
+            errors["service_request"] = "Request must belong to this organization."
+        if self.provider_id and self.organization_id and self.provider.organization_id != self.organization_id:
+            errors["provider"] = "Provider must belong to this organization."
+        if self.provider_match_id and self.provider_id and self.provider_match.provider_id != self.provider_id:
+            errors["provider_match"] = "Assignment provider must match the accepted match's provider."
+        if self.appointment_id and self.service_request_id and self.appointment.patient_id != self.service_request.patient_id:
+            errors["appointment"] = "Appointment must belong to the same patient as the request."
+        if (
+            self.service_request_id
+            and self.status in (self.Status.OFFERED, self.Status.ACCEPTED, self.Status.EN_ROUTE, self.Status.ARRIVED, self.Status.IN_PROGRESS)
+        ):
+            duplicate = HomeVisitAssignment.objects.filter(
+                service_request_id=self.service_request_id,
+                status__in=[self.Status.OFFERED, self.Status.ACCEPTED, self.Status.EN_ROUTE, self.Status.ARRIVED, self.Status.IN_PROGRESS],
+            ).exclude(pk=self.pk)
+            if duplicate.exists():
+                errors["service_request"] = "This request already has an active assignment."
+        if errors:
+            raise ValidationError(errors)
+
+    def __str__(self) -> str:
+        return f"{self.service_request} — {self.provider} assignment ({self.get_status_display()})"
+
+
+class VisitTravelStatus(UUIDTimeStampedModel):
+    """Append-only travel-status ping for a home visit — HomeVisitAssignment
+    only ever holds the current status, so this is the timeline behind it
+    (how long a provider was actually en route, a mid-trip delay note),
+    matching the insert-only-log pattern HomeExerciseLog already uses in
+    this file. update_assignment_status() writes one of these automatically
+    on every EN_ROUTE/ARRIVED transition; DELAYED is logged separately via
+    log_travel_delay() without changing the assignment's main status."""
+
+    class Status(models.TextChoices):
+        EN_ROUTE = "en_route", "En route"
+        ARRIVED = "arrived", "Arrived"
+        DELAYED = "delayed", "Delayed"
+
+    assignment = models.ForeignKey(HomeVisitAssignment, on_delete=models.CASCADE, related_name="travel_log")
+    status = models.CharField(max_length=16, choices=Status.choices)
+    note = models.CharField(max_length=240, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="created_visit_travel_statuses"
+    )
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["assignment", "-created_at"])]
+
+    def __str__(self) -> str:
+        return f"{self.assignment} — {self.get_status_display()} ({self.created_at:%Y-%m-%d %H:%M})"
+
+
+class ProviderLocationSession(UUIDTimeStampedModel):
+    """One bounded "sharing was active" window for a home-visit assignment's
+    travel segment — opened the moment update_assignment_status() transitions
+    an assignment to EN_ROUTE, closed the moment it leaves EN_ROUTE (or the
+    provider revokes location_sharing_enabled mid-trip, or the
+    purge_location_snapshots sweep finds one open far longer than any real
+    trip takes). Deliberately holds no coordinates itself — just the window
+    boundaries and why it closed — so it can be retained indefinitely as a
+    coordinate-free audit record even though every ProviderLocationSnapshot
+    tied to it is deleted the moment it closes (see
+    care/mobile_care.py:close_location_session). record_location_snapshot()
+    requires an open session to exist before accepting a ping; that's the
+    actual enforcement point for "no pings before travel starts or after
+    arrival," expressed as a session rather than re-deriving it from
+    assignment.status on every call."""
+
+    class EndReason(models.TextChoices):
+        ARRIVED = "arrived", "Provider arrived"
+        CANCELLED = "cancelled", "Visit cancelled"
+        STOPPED_BY_PROVIDER = "stopped_by_provider", "Provider turned off location sharing"
+        TIMED_OUT = "timed_out", "Session left open too long"
+
+    assignment = models.ForeignKey(HomeVisitAssignment, on_delete=models.CASCADE, related_name="location_sessions")
+    started_at = models.DateTimeField(default=timezone.now)
+    ended_at = models.DateTimeField(null=True, blank=True)
+    end_reason = models.CharField(max_length=24, choices=EndReason.choices, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="created_location_sessions"
+    )
+
+    class Meta:
+        ordering = ["-started_at"]
+        indexes = [models.Index(fields=["assignment", "ended_at"])]
+
+    def __str__(self) -> str:
+        state = "open" if self.ended_at is None else f"closed ({self.get_end_reason_display()})"
+        return f"{self.assignment} — location session {state}"
+
+
+class ProviderLocationSnapshot(UUIDTimeStampedModel):
+    """One GPS ping from a provider's device during an open
+    ProviderLocationSession. Privacy-sensitive by nature, so this is
+    deliberately narrow: capture requires the provider's own explicit
+    Provider.location_sharing_enabled opt-in (see
+    care/mobile_care.py:record_location_snapshot — a separate, in-app
+    decision from account/employment consent) plus a currently-open session,
+    and every ping is deleted the moment its session closes (see
+    close_location_session()) rather than waiting on a timer — the
+    purge_location_snapshots management command's time-based purge is only a
+    backstop for rows orphaned by a bug or a crashed app, not the primary
+    retention mechanism. This table is never meant to accumulate a location
+    history."""
+
+    session = models.ForeignKey(ProviderLocationSession, on_delete=models.CASCADE, related_name="pings")
+    latitude = models.DecimalField(max_digits=9, decimal_places=6)
+    longitude = models.DecimalField(max_digits=9, decimal_places=6)
+    accuracy_meters = models.PositiveIntegerField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["session", "-created_at"]), models.Index(fields=["created_at"])]
+
+    def __str__(self) -> str:
+        return f"{self.session.assignment} — ({self.latitude}, {self.longitude}) at {self.created_at:%Y-%m-%d %H:%M}"
 
 
 class Feature(UUIDTimeStampedModel):
@@ -868,6 +1468,12 @@ class Patient(UUIDTimeStampedModel):
         default=True,
         help_text="Whether this patient receives the (content-free) 'you have a new secure message' email.",
     )
+    sms_notifications_enabled = models.BooleanField(
+        default=False,
+        help_text="Opt-in for Mobile Care text message updates (visit reminders, provider en route, etc.). "
+        "Off by default, unlike email — SMS consent is opt-in, not opt-out. No effect until an SMS "
+        "provider is actually configured (see care/mobile_care_notifications.py).",
+    )
     assigned_therapist = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -1071,9 +1677,22 @@ class EpisodeOfCare(UUIDTimeStampedModel):
         Referral, on_delete=models.SET_NULL, null=True, blank=True, related_name="episodes_of_care"
     )
     diagnosis = models.CharField(max_length=240, blank=True)
+    # Plain-language reason for the episode (what a coordinator or patient
+    # would call it, e.g. "post-op knee replacement") — distinct from the
+    # formal `diagnosis` text above; the two commonly differ.
+    condition = models.CharField(max_length=240, blank=True)
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.ACTIVE)
     start_date = models.DateField(default=date.today)
     end_date = models.DateField(null=True, blank=True)
+    # Projected close-out date set when the episode is planned — distinct
+    # from `end_date`, which is only ever filled in once the episode
+    # actually ends and may differ from what was originally expected.
+    expected_end_date = models.DateField(null=True, blank=True)
+    # Free text (e.g. "2x/week") rather than a structured cadence — visit
+    # scheduling itself stays entirely in Appointment/HomeVisitAvailability;
+    # this is just the coordination target a care-episode plan states.
+    visit_frequency = models.CharField(max_length=80, blank=True)
+    expected_visit_count = models.PositiveSmallIntegerField(null=True, blank=True)
     notes = models.TextField(blank=True)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -1101,11 +1720,45 @@ class EpisodeOfCare(UUIDTimeStampedModel):
             errors["referral"] = "Referral must belong to the same patient."
         if self.end_date and self.start_date and self.end_date < self.start_date:
             errors["end_date"] = "End date cannot precede the start date."
+        if self.expected_end_date and self.start_date and self.expected_end_date < self.start_date:
+            errors["expected_end_date"] = "Expected end date cannot precede the start date."
         if errors:
             raise ValidationError(errors)
 
     def __str__(self) -> str:
         return f"{self.patient} — {self.get_status_display()} ({self.start_date})"
+
+    @property
+    def visits_completed_count(self) -> int:
+        """Derived, not stored — matches this file's "don't store what's
+        derivable" rule (see UserLicense.alert_tier / Patient.plan_of_care_alert_tier)."""
+        return self.appointments.filter(status=Appointment.Status.COMPLETED).count()
+
+    @property
+    def next_visit(self):
+        """The soonest not-yet-happened appointment under this episode, or
+        None — powers the patient chart's "Next Visit" field."""
+        return (
+            self.appointments.filter(
+                status__in=(Appointment.Status.SCHEDULED, Appointment.Status.CHECKED_IN),
+                starts_at__gte=timezone.now(),
+            )
+            .order_by("starts_at")
+            .first()
+        )
+
+    @property
+    def _active_plan_of_care_note(self):
+        """The most recently documented note under this episode that
+        carries a plan_of_care_end date — the episode-scoped counterpart to
+        Patient._active_plan_of_care_note (that one spans every episode a
+        patient has ever had; this narrows to just this one)."""
+        return self.clinical_notes.filter(plan_of_care_end__isnull=False).order_by("-service_date", "-created_at").first()
+
+    @property
+    def plan_of_care_end_date(self):
+        note = self._active_plan_of_care_note
+        return note.plan_of_care_end if note else None
 
 
 class Authorization(UUIDTimeStampedModel):
@@ -1631,6 +2284,8 @@ class ClinicalNote(UUIDTimeStampedModel):
     class Type(models.TextChoices):
         EVALUATION = "evaluation", "Initial evaluation"
         DAILY = "daily", "Daily treatment note"
+        SOAP = "soap", "SOAP note"
+        HOME_VISIT = "home_visit", "Home visit note"
         PROGRESS = "progress", "Progress note"
         RE_EVALUATION = "re_evaluation", "Re-evaluation"
         DISCHARGE = "discharge", "Discharge summary"
@@ -1680,12 +2335,23 @@ class ClinicalNote(UUIDTimeStampedModel):
     finalization_attestation = models.BooleanField(default=False)
 
     # Structured section data (ROM/MMT/special-tests/pain detail, discharge
-    # specifics) — read/written as one blob per note, never queried across
-    # notes in SQL, matching the existing OutcomeScore.item_responses /
-    # IntakeSubmission.answers JSONField precedent in this codebase.
+    # specifics, home-visit context) — read/written as one blob per note,
+    # never queried across notes in SQL, matching the existing
+    # OutcomeScore.item_responses / IntakeSubmission.answers JSONField
+    # precedent in this codebase.
     subjective_details = models.JSONField(default=dict, blank=True)
     objective_measurements = models.JSONField(default=dict, blank=True)
     discharge_details = models.JSONField(default=dict, blank=True)
+    # In-home-visit-specific context, relevant only when this note documents
+    # a home visit (is_home_visit on the linked Appointment, or note_type ==
+    # HOME_VISIT) — visitLocationType/homeSafetyNotes/functionalEnvironment/
+    # caregiverPresent/homeExerciseEducation/equipmentAssistiveDevice/
+    # environmentalBarriers. A blob, like discharge_details above, rather
+    # than seven new dedicated columns that would sit blank on every
+    # clinic-visit note — the clinical fields themselves (S/O/A/P, goals,
+    # interventions, plan of care, signature, addenda) are never duplicated;
+    # this only adds the extra context a home visit specifically needs.
+    home_visit_details = models.JSONField(default=dict, blank=True)
 
     # PTA cosign: set from Organization.pta_cosign_required at creation time
     # (only meaningful when the author is a PTA/ASSISTANT) — snapshotted so a
@@ -2700,6 +3366,13 @@ class PatientPayment(UUIDTimeStampedModel):
         FAILED = "failed", "Failed"
 
     patient = models.ForeignKey(Patient, on_delete=models.PROTECT, related_name="online_payments")
+    # Optional — same "which cash-pay context is this for" link
+    # PaymentRecord.superbill already carries; lets a Mobile Care deposit or
+    # self-pay visit payment be traced back to its request without a
+    # dedicated Mobile Care payment table.
+    mobile_care_request = models.ForeignKey(
+        "MobileCareRequest", on_delete=models.SET_NULL, null=True, blank=True, related_name="online_payments"
+    )
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
     processor_reference = models.CharField(max_length=160, blank=True)
@@ -2713,6 +3386,8 @@ class PatientPayment(UUIDTimeStampedModel):
     def clean(self):
         if self.amount is not None and self.amount <= 0:
             raise ValidationError({"amount": "Enter an amount greater than zero."})
+        if self.mobile_care_request_id and self.mobile_care_request.patient_id != self.patient_id:
+            raise ValidationError({"mobileCareRequest": "This request must belong to the same patient."})
 
     def __str__(self) -> str:
         return f"{self.patient} — ${self.amount} ({self.get_status_display()})"
@@ -2721,13 +3396,27 @@ class PatientPayment(UUIDTimeStampedModel):
 class ServicePrice(UUIDTimeStampedModel):
     """Org-configurable cash-pay price list — one row per CPT/service, the
     same data-driven-not-hard-coded pattern as Payer. Cash-pay charges look
-    up a price here rather than the UI hard-coding a dollar figure."""
+    up a price here rather than the UI hard-coding a dollar figure.
+
+    `home_visit_kind`/`is_home_visit_travel_fee` let an org tag up to one row
+    per Appointment.Kind (e.g. "this $175 row is our Home PT Initial
+    Evaluation price") plus at most one row as the org's optional travel
+    fee — care/mobile_care_billing.py reads these tags rather than a home
+    visit's billing code hard-coding a CPT code or dollar amount. A row
+    tagged either way is still an ordinary ServicePrice otherwise (usable
+    for any other cash-pay charge too); the two tags are mutually exclusive
+    on one row. `deposit_amount` is only meaningful on a home_visit_kind row
+    — an optional amount to collect via the existing PatientPayment/
+    payment_processor flow before the visit, never a new payment system."""
 
     organization = models.ForeignKey(Organization, on_delete=models.PROTECT, related_name="service_prices")
     cpt_code = models.CharField(max_length=5, validators=[_CPT_CODE_VALIDATOR])
     label = models.CharField(max_length=160)
     price = models.DecimalField(max_digits=10, decimal_places=2)
     is_active = models.BooleanField(default=True)
+    home_visit_kind = models.CharField(max_length=16, choices=Appointment.Kind.choices, blank=True)
+    is_home_visit_travel_fee = models.BooleanField(default=False)
+    deposit_amount = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="created_service_prices"
     )
@@ -2735,11 +3424,152 @@ class ServicePrice(UUIDTimeStampedModel):
     class Meta:
         ordering = ["cpt_code"]
         constraints = [
-            models.UniqueConstraint(fields=["organization", "cpt_code"], name="unique_service_price_per_org_cpt")
+            models.UniqueConstraint(fields=["organization", "cpt_code"], name="unique_service_price_per_org_cpt"),
+            models.UniqueConstraint(
+                fields=["organization", "home_visit_kind"],
+                condition=~Q(home_visit_kind=""),
+                name="unique_home_visit_kind_price_per_org",
+            ),
+            models.UniqueConstraint(
+                fields=["organization"],
+                condition=Q(is_home_visit_travel_fee=True),
+                name="unique_home_visit_travel_fee_per_org",
+            ),
         ]
+
+    def clean(self):
+        if self.home_visit_kind and self.is_home_visit_travel_fee:
+            raise ValidationError(
+                {"isHomeVisitTravelFee": "A price row can be tagged as a home-visit kind or the travel fee, not both."}
+            )
+        if self.deposit_amount is not None:
+            if self.is_home_visit_travel_fee or not self.home_visit_kind:
+                raise ValidationError({"depositAmount": "A deposit can only be set on a home-visit-kind price."})
+            if self.deposit_amount <= 0:
+                raise ValidationError({"depositAmount": "Enter a deposit amount greater than zero."})
 
     def __str__(self) -> str:
         return "%s — %s (%s)" % (self.cpt_code, self.label, self.price)
+
+
+class MobileCarePlatformDefaults(UUIDTimeStampedModel):
+    """Platform-wide Mobile Care defaults — Super Admin only. Always exactly
+    one row (see care/mobile_care_settings.py:get_platform_defaults(), which
+    get_or_create()s it); there is no Organization FK because this isn't
+    scoped to a tenant at all. An organization's own MobileCareConfiguration
+    overrides these on a field-by-field basis (a null/blank field on that
+    model falls back to the matching field here) — this is what "manage
+    platform-level defaults" means: the starting point every organization
+    inherits until it configures otherwise, not a hard ceiling."""
+
+    default_visit_duration_minutes = models.PositiveSmallIntegerField(default=45)
+    offer_expiration_hours = models.PositiveSmallIntegerField(default=4)
+    patient_cancellation_window_hours = models.PositiveSmallIntegerField(default=24)
+    provider_cancellation_notice_hours = models.PositiveSmallIntegerField(default=4)
+    max_travel_radius_miles = models.PositiveSmallIntegerField(default=25)
+    same_provider_continuity_preferred = models.BooleanField(default=True)
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="updated_mobile_care_platform_defaults"
+    )
+
+    def __str__(self) -> str:
+        return "Mobile Care platform defaults"
+
+
+class MobileCareConfiguration(UUIDTimeStampedModel):
+    """Per-organization Mobile Care policy — mirrors BookingConfiguration's
+    shape (one row per Organization, sensible defaults). Unlike
+    BookingConfiguration.online_booking_enabled, `mobile_care_enabled`
+    defaults to True, not False: Mobile Care has been available to every
+    entitled organization unrestricted (gated only by the "mobile_care"
+    subscription feature) since it shipped, so defaulting this new switch
+    to off would silently disable it for every organization already using
+    it. It's still layered on top of, not a replacement for, that
+    subscription entitlement (organization_has_feature()) — both must be
+    true — an organization admin can explicitly opt OUT, which the
+    equivalent BookingConfiguration switch has no equivalent of (booking
+    requires an explicit opt IN instead).
+
+    Service Areas (ServiceArea), Self-Pay Pricing, and the Travel Fee
+    (ServicePrice, tagged via home_visit_kind/is_home_visit_travel_fee — see
+    that model) already have their own dedicated storage from earlier
+    Mobile Care work and are deliberately NOT duplicated onto this model;
+    this table only holds the settings that had no home yet. Every
+    nullable/empty field here means "use the platform default" (see
+    MobileCarePlatformDefaults) or "no restriction," never a fabricated
+    value — see care/mobile_care_settings.py's effective_*() readers, which
+    are the only things that should read these fields directly."""
+
+    organization = models.OneToOneField(Organization, on_delete=models.CASCADE, related_name="mobile_care_configuration")
+    mobile_care_enabled = models.BooleanField(default=True)
+
+    default_visit_duration_minutes = models.PositiveSmallIntegerField(null=True, blank=True)
+    # Which MobileCareRequest.RequestedService values this org offers via a
+    # home visit at all — empty means no restriction (every service offered).
+    available_services = models.JSONField(default=list, blank=True)
+    # Which User.Role values ("therapist"/"assistant") may be a Mobile Care
+    # provider for this org at all — empty means no additional restriction
+    # beyond the universal PT/PTA scope-of-practice rule already enforced in
+    # check_provider_eligibility(). Read by _organization_specific_ineligibility_reason().
+    allowed_provider_roles = models.JSONField(default=list, blank=True)
+
+    max_travel_radius_miles = models.PositiveSmallIntegerField(null=True, blank=True)
+    offer_expiration_hours = models.PositiveSmallIntegerField(null=True, blank=True)
+    patient_cancellation_window_hours = models.PositiveSmallIntegerField(null=True, blank=True)
+    provider_cancellation_notice_hours = models.PositiveSmallIntegerField(null=True, blank=True)
+    provider_cancellation_requires_reason = models.BooleanField(default=True)
+
+    same_provider_continuity_preferred = models.BooleanField(null=True, blank=True)
+    # Per-dimension overrides merged over DEFAULT_MATCH_WEIGHTS (e.g.
+    # {"continuity": 40.0}) — only the named dimensions change; anything
+    # omitted keeps its module default. See rank_eligible_providers().
+    match_weight_overrides = models.JSONField(default=dict, blank=True)
+
+    # Org-wide operating window for home visits — null on either end means
+    # no restriction. Distinct from a provider's own HomeVisitAvailability
+    # rows (which are per-provider, per-day); this is a blanket ceiling
+    # checked at schedule time regardless of what any one provider has open.
+    service_hours_start = models.TimeField(null=True, blank=True)
+    service_hours_end = models.TimeField(null=True, blank=True)
+
+    # Mobile Care notification event codes (see mobile_care_notifications.py)
+    # this organization has turned off entirely — checked before the
+    # per-patient email/SMS preference, same "org policy first, then patient
+    # preference" ordering notify_* already applies for opt-outs.
+    disabled_notification_events = models.JSONField(default=list, blank=True)
+
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="created_mobile_care_configurations"
+    )
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="updated_mobile_care_configurations"
+    )
+
+    def clean(self):
+        # Local import — care/mobile_care.py imports FROM this models module,
+        # so importing DEFAULT_MATCH_WEIGHTS at module load time would be
+        # circular; deferring it to call time (by which point both modules
+        # are fully loaded) avoids that.
+        from .mobile_care import DEFAULT_MATCH_WEIGHTS
+
+        if self.service_hours_start and self.service_hours_end and self.service_hours_start >= self.service_hours_end:
+            raise ValidationError({"serviceHoursEnd": "Service hours end must be after the start time."})
+        if not isinstance(self.available_services, list) or any(
+            value not in MobileCareRequest.RequestedService.values for value in self.available_services
+        ):
+            raise ValidationError({"availableServices": "Choose only valid requested-service values."})
+        if not isinstance(self.allowed_provider_roles, list) or any(
+            value not in (User.Role.THERAPIST, User.Role.ASSISTANT) for value in self.allowed_provider_roles
+        ):
+            raise ValidationError({"allowedProviderRoles": "Choose only therapist or assistant."})
+        if not isinstance(self.match_weight_overrides, dict) or any(
+            key not in DEFAULT_MATCH_WEIGHTS or not isinstance(value, (int, float)) or value < 0
+            for key, value in self.match_weight_overrides.items()
+        ):
+            raise ValidationError({"matchWeightOverrides": "Enter a non-negative number for each recognized ranking dimension."})
+
+    def __str__(self) -> str:
+        return f"Mobile Care configuration — {self.organization}"
 
 
 class CashPackage(UUIDTimeStampedModel):
@@ -2838,8 +3668,14 @@ class AuditEvent(models.Model):
     """Append-only audit trail. Metadata must contain no clinical narrative."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    # Nullable only for a genuinely platform-wide event with no single owning
+    # tenant (e.g. a Super Admin changing Mobile Care platform-level
+    # defaults) — see services.record_platform_audit_event(). Every
+    # tenant-scoped action still goes through record_audit_event(), which
+    # keeps requiring a real organization; this null path is deliberately
+    # not reachable from there.
     organization = models.ForeignKey(
-        Organization, on_delete=models.PROTECT, related_name="audit_events"
+        Organization, on_delete=models.PROTECT, null=True, blank=True, related_name="audit_events"
     )
     patient = models.ForeignKey(
         Patient,

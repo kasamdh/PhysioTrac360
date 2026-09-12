@@ -209,7 +209,7 @@ _NOTE_TEXT_FIELDS = {
 }
 _NOTE_JSON_FIELDS = {
     "subjectiveDetails": "subjective_details", "objectiveMeasurements": "objective_measurements",
-    "dischargeDetails": "discharge_details",
+    "dischargeDetails": "discharge_details", "homeVisitDetails": "home_visit_details",
 }
 _NOTE_DATE_FIELDS = {
     "serviceDate": "service_date", "planOfCareStart": "plan_of_care_start",

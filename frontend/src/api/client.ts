@@ -22,6 +22,9 @@ import type {
   HomeExercise,
   HomeProgram,
   HomeProgramSuggestion,
+  HomeVisitBillingEstimate,
+  MobileCareConfiguration,
+  MobileCarePlatformDefaults,
   PatientStatement,
   PatientStatementData,
   PatientSuperbillData,
@@ -52,8 +55,20 @@ import type {
   PortalHepLog,
   PortalHepProgram,
   PortalInsurancePolicy,
+  Appointment,
   PortalInviteResult,
   PortalMessage,
+  MobileCareRequest,
+  MobileCareProviderMatch,
+  MobileCareServiceArea,
+  MobileCarePersistedMatch,
+  MobileCareOfferPreview,
+  MobileCareDashboardData,
+  MobileCareAssignment,
+  MobileCareTravelStatusEntry,
+  MobileCareStatusHistoryEntry,
+  HomeVisitAvailability,
+  PortalMobileCareRequest,
   PortalOutcomeAssignment,
   PortalOutcomeSchema,
   PortalOutcomeSubmitResult,
@@ -150,6 +165,29 @@ async function request<T>(
     body: options.body ? JSON.stringify(options.body) : undefined,
   });
   return readJson<T>(response);
+}
+
+export interface MobileCareRequestPayload {
+  [key: string]: unknown;
+  addressLine1: string;
+  addressLine2?: string;
+  city: string;
+  state: string;
+  zipCode: string;
+  reasonForVisit?: string;
+  notes?: string;
+  earliestDate: string;
+  latestDate?: string | null;
+  preferredProviderId?: string | null;
+  requestedService?: string;
+  specialtyRequested?: string;
+  preferredTimeWindow?: string;
+  primaryCondition?: string;
+  providerGenderPreference?: string;
+  isNewPatient?: boolean;
+  paymentMethod?: string;
+  mobilityNotes?: string;
+  homeAccessNotes?: string;
 }
 
 export const api = {
@@ -253,6 +291,200 @@ export const api = {
       body: { status },
     });
   },
+  async portalMobileCareRequests() {
+    return request<{ requests: PortalMobileCareRequest[] }>("/portal/mobile-care-requests/");
+  },
+  async portalCreateMobileCareRequest(body: Omit<MobileCareRequestPayload, "preferredProviderId">) {
+    return request<{ request: PortalMobileCareRequest }>("/portal/mobile-care-requests/", { method: "POST", body });
+  },
+  async portalCancelMobileCareRequest(requestId: string) {
+    return request<{ request: PortalMobileCareRequest }>(`/portal/mobile-care-requests/${requestId}/cancel/`, {
+      method: "POST",
+    });
+  },
+  async portalMobileCareRequestDetail(requestId: string) {
+    return request<{ request: PortalMobileCareRequest }>(`/portal/mobile-care-requests/${requestId}/`);
+  },
+  async portalUpdateMobileCareRequest(requestId: string, body: Record<string, unknown>) {
+    return request<{ request: PortalMobileCareRequest }>(`/portal/mobile-care-requests/${requestId}/`, {
+      method: "PATCH",
+      body,
+    });
+  },
+  async mobileCareRequestCreate(patientId: string, body: MobileCareRequestPayload) {
+    return request<{ request: MobileCareRequest }>(`/patients/${patientId}/mobile-care-requests/`, {
+      method: "POST",
+      body,
+    });
+  },
+  async mobileCareRequestDetail(requestId: string) {
+    return request<{ request: MobileCareRequest }>(`/mobile-care/requests/${requestId}/`);
+  },
+  async mobileCareRequestUpdate(requestId: string, body: Partial<MobileCareRequestPayload>) {
+    return request<{ request: MobileCareRequest }>(`/mobile-care/requests/${requestId}/`, {
+      method: "PATCH",
+      body,
+    });
+  },
+  async mobileCareRequestCancel(requestId: string, reason?: string) {
+    return request<{ request: MobileCareRequest }>(`/mobile-care/requests/${requestId}/cancel/`, {
+      method: "POST",
+      body: reason ? { reason } : undefined,
+    });
+  },
+  async mobileCareRequestStatusHistory(requestId: string) {
+    return request<{ history: MobileCareStatusHistoryEntry[] }>(`/mobile-care/requests/${requestId}/status-history/`);
+  },
+  async mobileCareRequestList(status?: string) {
+    return request<{ requests: MobileCareRequest[] }>(`/mobile-care/requests/${status ? `?status=${status}` : ""}`);
+  },
+  async mobileCareDashboard() {
+    return request<MobileCareDashboardData>("/mobile-care/dashboard/");
+  },
+  async mobileCareRequestMatches(requestId: string) {
+    return request<{ providers: MobileCareProviderMatch[] }>(`/mobile-care/requests/${requestId}/matches/`);
+  },
+  async mobileCareRequestMatch(requestId: string, providerId: string) {
+    return request<{ request: MobileCareRequest }>(`/mobile-care/requests/${requestId}/match/`, {
+      method: "POST",
+      body: { providerId },
+    });
+  },
+  async mobileCareRequestSchedule(requestId: string, body: { startsAt: string; endsAt: string; kind?: string }) {
+    return request<{ appointment: Appointment; request: MobileCareRequest }>(
+      `/mobile-care/requests/${requestId}/schedule/`,
+      { method: "POST", body },
+    );
+  },
+  async mobileCareRequestDecline(requestId: string) {
+    return request<{ request: MobileCareRequest }>(`/mobile-care/requests/${requestId}/decline/`, { method: "POST" });
+  },
+  async homeVisitQueue(date?: string) {
+    return request<{ date: string; visits: Appointment[] }>(`/mobile-care/my-queue/${date ? `?date=${date}` : ""}`);
+  },
+  async mobileCareDirections(address: string) {
+    return request<{ available: boolean; url: string | null; message: string }>(
+      `/mobile-care/directions/?address=${encodeURIComponent(address)}`,
+    );
+  },
+  async homeVisitStatusUpdate(appointmentId: string, status: "checked_in" | "completed" | "no_show") {
+    return request<{ appointment: Appointment }>(`/mobile-care/visits/${appointmentId}/status/`, {
+      method: "POST",
+      body: { status },
+    });
+  },
+  async mobileCareRequestAddTravelCharge(requestId: string, body: { cptCode?: string; chargeAmount?: string } = {}) {
+    return request<{ charge: Charge }>(`/mobile-care/requests/${requestId}/add-travel-charge/`, {
+      method: "POST",
+      body,
+    });
+  },
+  async mobileCareRequestAddServiceCharge(requestId: string) {
+    return request<{ charge: Charge }>(`/mobile-care/requests/${requestId}/add-service-charge/`, { method: "POST" });
+  },
+  async mobileCareRequestBillingEstimate(requestId: string) {
+    return request<{ estimate: HomeVisitBillingEstimate }>(`/mobile-care/requests/${requestId}/billing-estimate/`);
+  },
+  async mobileCareProviders() {
+    return request<{ providers: MobileCareProviderMatch[] }>("/mobile-care/providers/");
+  },
+  async mobileCareServiceAreas(params?: { state?: string; eligibleOnly?: boolean; includeInactive?: boolean }) {
+    const query = new URLSearchParams();
+    if (params?.state) query.set("state", params.state);
+    if (params?.eligibleOnly) query.set("eligibleOnly", "true");
+    if (params?.includeInactive) query.set("includeInactive", "true");
+    const queryString = query.toString();
+    return request<{ serviceAreas: MobileCareServiceArea[] }>(`/mobile-care/service-areas/${queryString ? `?${queryString}` : ""}`);
+  },
+  async createMobileCareServiceArea(body: {
+    name: string;
+    providerId: string;
+    zipCodes?: string[];
+    primaryZipCode?: string;
+    city?: string;
+    state?: string;
+    radiusMiles?: number | null;
+    maxTravelDistanceMiles?: number | null;
+  }) {
+    return request<{ serviceArea: MobileCareServiceArea }>("/mobile-care/service-areas/", { method: "POST", body });
+  },
+  async updateMobileCareServiceArea(areaId: string, body: Record<string, unknown>) {
+    return request<{ serviceArea: MobileCareServiceArea }>(`/mobile-care/service-areas/${areaId}/`, {
+      method: "PATCH",
+      body,
+    });
+  },
+  async deactivateMobileCareServiceArea(areaId: string) {
+    return request<{ serviceArea: MobileCareServiceArea }>(`/mobile-care/service-areas/${areaId}/`, { method: "DELETE" });
+  },
+  async mobileCareAvailabilityList(params?: { providerId?: string; includeInactive?: boolean }) {
+    const query = new URLSearchParams();
+    if (params?.providerId) query.set("providerId", params.providerId);
+    if (params?.includeInactive) query.set("includeInactive", "true");
+    const queryString = query.toString();
+    return request<{ availability: HomeVisitAvailability[] }>(`/mobile-care/availability/${queryString ? `?${queryString}` : ""}`);
+  },
+  async createMobileCareAvailability(body: Record<string, unknown>) {
+    return request<{ availability: HomeVisitAvailability }>("/mobile-care/availability/", { method: "POST", body });
+  },
+  async updateMobileCareAvailability(availabilityId: string, body: Record<string, unknown>) {
+    return request<{ availability: HomeVisitAvailability }>(`/mobile-care/availability/${availabilityId}/`, {
+      method: "PATCH",
+      body,
+    });
+  },
+  async deactivateMobileCareAvailability(availabilityId: string) {
+    return request<{ availability: HomeVisitAvailability }>(`/mobile-care/availability/${availabilityId}/`, {
+      method: "DELETE",
+    });
+  },
+  async mobileCareGenerateMatches(requestId: string) {
+    return request<{ matches: MobileCarePersistedMatch[] }>(`/mobile-care/requests/${requestId}/generate-matches/`, {
+      method: "POST",
+    });
+  },
+  async mobileCareProviderMatches(requestId: string) {
+    return request<{ matches: MobileCarePersistedMatch[] }>(`/mobile-care/requests/${requestId}/provider-matches/`);
+  },
+  async mobileCareMyOffers() {
+    return request<{ offers: MobileCareOfferPreview[] }>("/mobile-care/my-offers/");
+  },
+  async mobileCareOfferMatch(matchId: string) {
+    return request<{ match: MobileCarePersistedMatch }>(`/mobile-care/matches/${matchId}/offer/`, { method: "POST" });
+  },
+  async mobileCareRespondToMatch(matchId: string, body: { accept: boolean; declineReason?: string }) {
+    return request<{ match: MobileCarePersistedMatch; assignment: MobileCareAssignment | null }>(
+      `/mobile-care/matches/${matchId}/respond/`,
+      { method: "POST", body },
+    );
+  },
+  async mobileCareMyAssignments() {
+    return request<{ assignments: MobileCareAssignment[] }>("/mobile-care/my-assignments/");
+  },
+  async mobileCareTodaysHomeVisits() {
+    return request<{ visits: MobileCareAssignment[] }>("/mobile-care/my-assignments/today/");
+  },
+  async mobileCareScheduleAssignment(assignmentId: string, body: { startsAt: string; endsAt: string; kind?: string }) {
+    return request<{ appointment: Appointment; assignment: MobileCareAssignment }>(
+      `/mobile-care/assignments/${assignmentId}/schedule/`,
+      { method: "POST", body },
+    );
+  },
+  async mobileCareAssignmentStatusUpdate(assignmentId: string, status: "en_route" | "arrived" | "in_progress" | "completed" | "cancelled") {
+    return request<{ assignment: MobileCareAssignment }>(`/mobile-care/assignments/${assignmentId}/status/`, {
+      method: "POST",
+      body: { status },
+    });
+  },
+  async mobileCareAssignmentTravelLog(assignmentId: string) {
+    return request<{ travelLog: MobileCareTravelStatusEntry[] }>(`/mobile-care/assignments/${assignmentId}/travel-log/`);
+  },
+  async mobileCareLogDelay(assignmentId: string, note?: string) {
+    return request<{ travelStatus: MobileCareTravelStatusEntry }>(`/mobile-care/assignments/${assignmentId}/delay/`, {
+      method: "POST",
+      body: { note },
+    });
+  },
   async portalForms() {
     return request<{ forms: PortalFormOverview[] }>("/portal/forms/");
   },
@@ -342,8 +574,11 @@ export const api = {
   async portalStatementDetail(statementId: string) {
     return request<{ statement: PatientStatementData }>(`/portal/payments/statements/${statementId}/`);
   },
-  async portalPaymentCharge(amount: string) {
-    return request<PortalPaymentChargeResult>("/portal/payments/charge/", { method: "POST", body: { amount } });
+  async portalPaymentCharge(amount: string, mobileCareRequestId?: string) {
+    return request<PortalPaymentChargeResult>("/portal/payments/charge/", {
+      method: "POST",
+      body: mobileCareRequestId ? { amount, mobileCareRequestId } : { amount },
+    });
   },
   async portalSuperbills() {
     return request<{ superbills: PortalSuperbillSummary[] }>("/portal/superbills/");
@@ -670,6 +905,21 @@ export const api = {
   async patientCashPackages(patientId: string) {
     return request<{ cashPackages: CashPackage[] }>(`/patients/${patientId}/cash-packages/`);
   },
+  async mobileCareConfiguration() {
+    return request<{ configuration: MobileCareConfiguration }>("/mobile-care/configuration/");
+  },
+  async updateMobileCareConfiguration(body: Record<string, unknown>) {
+    return request<{ configuration: MobileCareConfiguration }>("/mobile-care/configuration/", { method: "PATCH", body });
+  },
+  async superAdminMobileCarePlatformDefaults() {
+    return request<{ platformDefaults: MobileCarePlatformDefaults }>("/super-admin/mobile-care/platform-defaults/");
+  },
+  async updateSuperAdminMobileCarePlatformDefaults(body: Record<string, unknown>) {
+    return request<{ platformDefaults: MobileCarePlatformDefaults }>("/super-admin/mobile-care/platform-defaults/", {
+      method: "PATCH",
+      body,
+    });
+  },
   async createCashPackage(patientId: string, body: Record<string, unknown>) {
     return request<{ cashPackage: CashPackage }>(`/patients/${patientId}/cash-packages/`, { method: "POST", body });
   },
@@ -892,6 +1142,9 @@ export const api = {
   },
   async privilegedPatients(clientNumber: number) {
     return request<{ patients: Patient[] }>(`/super-admin/clients/${clientNumber}/privileged-patients/`);
+  },
+  async privilegedMobileCareDashboard(clientNumber: number) {
+    return request<MobileCareDashboardData>(`/super-admin/clients/${clientNumber}/privileged-mobile-care/`);
   },
   async privilegedPatientDetail(clientNumber: number, patientId: string) {
     return request<PrivilegedPatientDetail>(`/super-admin/clients/${clientNumber}/privileged-patients/${patientId}/`);

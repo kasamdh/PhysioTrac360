@@ -52,6 +52,14 @@ const SECTIONS_BY_TYPE: Record<string, { key: string; label: string }[]> = {
     { key: "plan", label: "Plan" },
     { key: "signature", label: "Signature" },
   ],
+  home_visit: [
+    { key: "subjective", label: "Subjective" },
+    { key: "objective", label: "Objective / Interventions" },
+    { key: "homeVisitContext", label: "Home Visit Context" },
+    { key: "assessment", label: "Assessment" },
+    { key: "plan", label: "Plan" },
+    { key: "signature", label: "Signature" },
+  ],
   progress: [
     { key: "subjective", label: "Subjective" },
     { key: "objective", label: "Objective" },
@@ -114,6 +122,19 @@ interface DischargeDetails {
   dischargeDestination?: string;
 }
 
+// Home-visit-specific context — additional to (never a substitute for) the
+// same Subjective/Objective/Assessment/Plan, goals, interventions, plan of
+// care, signature, and addenda every other note type already uses.
+interface HomeVisitDetails {
+  visitLocationType?: string;
+  homeSafetyNotes?: string;
+  functionalEnvironment?: string;
+  caregiverPresent?: string;
+  homeExerciseEducation?: string;
+  equipmentAssistiveDevice?: string;
+  environmentalBarriers?: string;
+}
+
 function textField(label: string, value: string, onChange: (v: string) => void, opts?: { placeholder?: string; disabled?: boolean }) {
   return (
     <label className="mb-3 block text-sm">
@@ -140,6 +161,7 @@ export function DocumentationWorkspace({ patientId, noteId, user, onBack }: Docu
   const [subjectiveDetails, setSubjectiveDetails] = useState<SubjectiveDetails>({});
   const [objectiveMeasurements, setObjectiveMeasurements] = useState<ObjectiveMeasurements>({});
   const [dischargeDetails, setDischargeDetails] = useState<DischargeDetails>({});
+  const [homeVisitDetails, setHomeVisitDetails] = useState<HomeVisitDetails>({});
   const [planOfCareStart, setPlanOfCareStart] = useState("");
   const [planOfCareEnd, setPlanOfCareEnd] = useState("");
   const [frequencyPerWeek, setFrequencyPerWeek] = useState("");
@@ -173,6 +195,7 @@ export function DocumentationWorkspace({ patientId, noteId, user, onBack }: Docu
     setSubjectiveDetails((loaded.subjectiveDetails as SubjectiveDetails) || {});
     setObjectiveMeasurements((loaded.objectiveMeasurements as ObjectiveMeasurements) || {});
     setDischargeDetails((loaded.dischargeDetails as DischargeDetails) || {});
+    setHomeVisitDetails((loaded.homeVisitDetails as HomeVisitDetails) || {});
     setPlanOfCareStart(loaded.planOfCareStart || "");
     setPlanOfCareEnd(loaded.planOfCareEnd || "");
     setFrequencyPerWeek(loaded.frequencyPerWeek ? String(loaded.frequencyPerWeek) : "");
@@ -208,6 +231,7 @@ export function DocumentationWorkspace({ patientId, noteId, user, onBack }: Docu
             subjectiveDetails,
             objectiveMeasurements,
             dischargeDetails,
+            homeVisitDetails,
             planOfCareStart: planOfCareStart || null,
             planOfCareEnd: planOfCareEnd || null,
             frequencyPerWeek: frequencyPerWeek ? Number(frequencyPerWeek) : null,
@@ -225,7 +249,7 @@ export function DocumentationWorkspace({ patientId, noteId, user, onBack }: Docu
       if (saveTimer.current) clearTimeout(saveTimer.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [subjectiveText, objectiveText, assessmentText, planText, subjectiveDetails, objectiveMeasurements, dischargeDetails, planOfCareStart, planOfCareEnd, frequencyPerWeek, durationWeeks, reassessmentDue]);
+  }, [subjectiveText, objectiveText, assessmentText, planText, subjectiveDetails, objectiveMeasurements, dischargeDetails, homeVisitDetails, planOfCareStart, planOfCareEnd, frequencyPerWeek, durationWeeks, reassessmentDue]);
 
   async function handleSign() {
     const result = await api.signNote(noteId, true);
@@ -272,6 +296,7 @@ export function DocumentationWorkspace({ patientId, noteId, user, onBack }: Docu
       case "planOfCare": complete = Boolean(planOfCareStart && planOfCareEnd && frequencyPerWeek && durationWeeks); break;
       case "goals": complete = patientDetail.goals.length > 0; break;
       case "discharge": complete = Boolean(dischargeDetails.reasonForDischarge); break;
+      case "homeVisitContext": complete = Boolean(homeVisitDetails.visitLocationType); break;
       case "compare": complete = true; break;
       case "signature": complete = note.status === "signed"; break;
       default: complete = false;
@@ -542,6 +567,23 @@ export function DocumentationWorkspace({ patientId, noteId, user, onBack }: Docu
               <p className="text-sm text-muted-foreground">
                 Goals met: {patientDetail.goals.filter((g) => g.status === "met").length} of {patientDetail.goals.length}
               </p>
+            </div>
+          )}
+
+          {activeSection === "homeVisitContext" && (
+            <div>
+              <h3 className="m-0 mb-4 text-lg font-bold text-foreground">Home Visit Context</h3>
+              <p className="mb-4 text-sm text-muted-foreground">
+                Additional context specific to this in-home visit — the clinical documentation above (Subjective,
+                Objective, Assessment, Plan, goals, interventions, plan of care) is unchanged for a home visit.
+              </p>
+              {textField("Visit Location Type", homeVisitDetails.visitLocationType || "", (v) => setHomeVisitDetails((c) => ({ ...c, visitLocationType: v })), { disabled: readOnly, placeholder: "e.g. Patient's home, caregiver's home, assisted living" })}
+              {textField("Home Safety Notes", homeVisitDetails.homeSafetyNotes || "", (v) => setHomeVisitDetails((c) => ({ ...c, homeSafetyNotes: v })), { disabled: readOnly })}
+              {textField("Functional Environment", homeVisitDetails.functionalEnvironment || "", (v) => setHomeVisitDetails((c) => ({ ...c, functionalEnvironment: v })), { disabled: readOnly, placeholder: "e.g. stairs, flooring, layout" })}
+              {textField("Caregiver Present", homeVisitDetails.caregiverPresent || "", (v) => setHomeVisitDetails((c) => ({ ...c, caregiverPresent: v })), { disabled: readOnly, placeholder: "e.g. spouse present and participated" })}
+              {textField("Home Exercise Education", homeVisitDetails.homeExerciseEducation || "", (v) => setHomeVisitDetails((c) => ({ ...c, homeExerciseEducation: v })), { disabled: readOnly })}
+              {textField("Equipment / Assistive Device", homeVisitDetails.equipmentAssistiveDevice || "", (v) => setHomeVisitDetails((c) => ({ ...c, equipmentAssistiveDevice: v })), { disabled: readOnly })}
+              {textField("Environmental Barriers", homeVisitDetails.environmentalBarriers || "", (v) => setHomeVisitDetails((c) => ({ ...c, environmentalBarriers: v })), { disabled: readOnly })}
             </div>
           )}
 

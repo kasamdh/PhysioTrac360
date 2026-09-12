@@ -656,3 +656,26 @@ def record_audit_event(
         ip_address=ip_address or None,
         metadata=metadata or {},
     )
+
+
+def record_platform_audit_event(*, actor, action: str, obj, request=None, metadata: dict | None = None) -> AuditEvent:
+    """Same as record_audit_event(), for the rare event that genuinely has
+    no single owning tenant — e.g. a Super Admin changing a platform-wide
+    default (MobileCarePlatformDefaults) that every organization inherits
+    from. Deliberately a separate function rather than relaxing
+    record_audit_event()'s own "an organization is required" guard, so
+    every one of that function's existing (tenant-scoped) call sites keeps
+    its current guarantee unchanged."""
+    forwarded = request.META.get("HTTP_X_FORWARDED_FOR", "") if request else ""
+    ip_address = forwarded.split(",")[0].strip() if forwarded else None
+    if not ip_address and request:
+        ip_address = request.META.get("REMOTE_ADDR")
+    return AuditEvent.objects.create(
+        organization=None,
+        actor=actor if getattr(actor, "is_authenticated", False) else None,
+        action=action,
+        object_type=obj._meta.label_lower,
+        object_id=getattr(obj, "pk", None),
+        ip_address=ip_address or None,
+        metadata=metadata or {},
+    )

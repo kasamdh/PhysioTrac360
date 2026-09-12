@@ -18,6 +18,7 @@ export function SuperAdminAdministrationPage({ user, onNavigate, onLogout }: Sup
     { label: "Clients", action: () => onNavigate("clients") },
     { label: "Users", action: () => onNavigate("users") },
     { label: "Credentials", action: () => onNavigate("credentials") },
+    { label: "Mobile Care Defaults", action: () => onNavigate("mobile-care-platform-defaults") },
   ];
 
   return (

@@ -4,7 +4,7 @@ import type { WorkspaceUser } from "../api/types";
 import { AppFooter } from "./AppFooter";
 import { HomeTopBar } from "./HomeTopBar";
 
-export type WorkspacePage = "dashboard" | "schedule" | "patients" | "documentation" | "safety" | "clients" | "users" | "clinic-settings" | "reports" | "admin-hub" | "credentials";
+export type WorkspacePage = "dashboard" | "schedule" | "mobile-care" | "patients" | "documentation" | "safety" | "clients" | "users" | "clinic-settings" | "reports" | "admin-hub" | "credentials" | "mobile-care-platform-defaults";
 
 interface AppShellProps {
   user: WorkspaceUser;
@@ -17,6 +17,7 @@ interface AppShellProps {
 const PAGE_LABELS: Record<WorkspacePage, string> = {
   dashboard: "Home",
   schedule: "Scheduling",
+  "mobile-care": "Mobile Care",
   patients: "Patients",
   documentation: "Documentation",
   safety: "Safety & Audit",
@@ -26,6 +27,7 @@ const PAGE_LABELS: Record<WorkspacePage, string> = {
   clients: "Clients",
   "admin-hub": "Administration",
   credentials: "Credentials",
+  "mobile-care-platform-defaults": "Mobile Care Platform Defaults",
 };
 
 export function AppShell({ user, page, onNavigate, onLogout, children }: AppShellProps) {
@@ -36,6 +38,7 @@ export function AppShell({ user, page, onNavigate, onLogout, children }: AppShel
     ? []
     : [
         ...(user.capabilities.canManageSchedule ? [{ key: "schedule" as const, label: "Schedule", icon: "◷" }] : []),
+        ...(user.capabilities.canManageSchedule ? [{ key: "mobile-care" as const, label: "Mobile Care", icon: "⌂" }] : []),
         { key: "patients" as const, label: "Patients", icon: "◉" },
         ...(user.capabilities.canAccessClinical ? [{ key: "documentation" as const, label: "Documentation", icon: "▤" }] : []),
         ...(user.capabilities.canManageAccess ? [{ key: "users" as const, label: "Users", icon: "◈" }] : []),

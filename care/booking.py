@@ -335,7 +335,18 @@ def create_portal_booking(
 
 
 def _assert_within_patient_change_window(appointment: Appointment, config: BookingConfiguration) -> None:
-    if appointment.starts_at - timezone.now() < timedelta(hours=config.patient_change_cutoff_hours):
+    if appointment.is_home_visit:
+        # Mobile Care's own configurable "Patient Cancellation Window"
+        # (MobileCareConfiguration.patient_cancellation_window_hours),
+        # not the general BookingConfiguration cutoff — a clinic may
+        # reasonably want a longer notice period for a home visit than
+        # for an in-clinic appointment.
+        from .mobile_care_settings import effective_patient_cancellation_window_hours
+
+        cutoff_hours = effective_patient_cancellation_window_hours(config.organization)
+    else:
+        cutoff_hours = config.patient_change_cutoff_hours
+    if appointment.starts_at - timezone.now() < timedelta(hours=cutoff_hours):
         raise ChangeCutoffError()
 
 

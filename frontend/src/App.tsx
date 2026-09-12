@@ -15,6 +15,8 @@ import { DocumentationPage } from "./features/documentation/DocumentationPage";
 import { DocumentationWorkspace } from "./features/documentation/DocumentationWorkspace";
 import { ForcedPasswordChangeDialog } from "./features/ForcedPasswordChangeDialog";
 import { LoginScreen } from "./features/LoginScreen";
+import { MobileCarePage } from "./features/MobileCarePage";
+import { MobileCarePlatformDefaultsPage } from "./features/MobileCarePlatformDefaultsPage";
 import { OrganizationUsersPage } from "./features/OrganizationUsersPage";
 import { PatientsPage } from "./features/PatientsPage";
 import { PortalAppointmentsPage } from "./features/portal/PortalAppointmentsPage";
@@ -24,6 +26,7 @@ import { PortalDocumentsPage } from "./features/portal/PortalDocumentsPage";
 import { PortalFormsSection } from "./features/portal/PortalFormsSection";
 import { PortalHepPage } from "./features/portal/PortalHepPage";
 import { PortalMessagesPage } from "./features/portal/PortalMessagesPage";
+import { PortalMobileCarePage } from "./features/portal/PortalMobileCarePage";
 import { PortalOutcomesSection } from "./features/portal/PortalOutcomesSection";
 import { PortalPaymentsPage } from "./features/portal/PortalPaymentsPage";
 import { PortalProfilePage } from "./features/portal/PortalProfilePage";
@@ -37,11 +40,11 @@ import { SuperAdminAdministrationPage } from "./features/SuperAdminAdministratio
 import { SuperAdminHomePage } from "./features/SuperAdminHomePage";
 import { onSessionEnded } from "./lib/sessionEvents";
 
-const TENANT_PAGES: WorkspacePage[] = ["schedule", "patients", "documentation", "safety", "users", "clinic-settings", "reports"];
+const TENANT_PAGES: WorkspacePage[] = ["schedule", "mobile-care", "patients", "documentation", "safety", "users", "clinic-settings", "reports"];
 
 function pageFromHash(): WorkspacePage {
   const value = window.location.hash.replace("#", "").split("/")[0];
-  return (TENANT_PAGES as string[]).includes(value) || value === "clients" || value === "admin-hub" || value === "credentials"
+  return (TENANT_PAGES as string[]).includes(value) || value === "clients" || value === "admin-hub" || value === "credentials" || value === "mobile-care-platform-defaults"
     ? (value as WorkspacePage)
     : "dashboard";
 }
@@ -176,6 +179,7 @@ export default function App() {
         {portalPage === "dashboard" && <PortalDashboardPage onNavigate={setPortalPage} />}
         {portalPage === "appointments" && <PortalAppointmentsPage />}
         {portalPage === "book" && <PortalBookingPage onBooked={() => setPortalPage("appointments")} />}
+        {portalPage === "mobile-care" && <PortalMobileCarePage />}
         {portalPage === "forms" && <PortalFormsSection />}
         {portalPage === "documents" && <PortalDocumentsPage />}
         {portalPage === "hep" && <PortalHepPage />}
@@ -189,20 +193,22 @@ export default function App() {
   }
 
   const visiblePage = user.capabilities.isSuperAdmin
-    ? (["users", "clients", "dashboard", "admin-hub", "credentials"].includes(page) ? page : "dashboard")
+    ? (["users", "clients", "dashboard", "admin-hub", "credentials", "mobile-care-platform-defaults"].includes(page) ? page : "dashboard")
     : page === "schedule" && !user.capabilities.canManageSchedule
       ? "dashboard"
-      : page === "documentation" && !user.capabilities.canAccessClinical
+      : page === "mobile-care" && !user.capabilities.canManageSchedule
         ? "dashboard"
-        : page === "safety" && !user.capabilities.canReviewAudit
+        : page === "documentation" && !user.capabilities.canAccessClinical
           ? "dashboard"
-          : page === "users" && !user.capabilities.canManageAccess
+          : page === "safety" && !user.capabilities.canReviewAudit
             ? "dashboard"
-            : (page === "clinic-settings" || page === "reports") && user.role !== "admin"
+            : page === "users" && !user.capabilities.canManageAccess
               ? "dashboard"
-              : page === "clients"
+              : (page === "clinic-settings" || page === "reports") && user.role !== "admin"
                 ? "dashboard"
-                : page;
+                : page === "clients"
+                  ? "dashboard"
+                  : page;
 
   // The Home landing page (Super Admin and org-admin) is a standalone,
   // sidebar-free page — like the login screen — not a page inside AppShell.
@@ -234,6 +240,7 @@ export default function App() {
         : <DocumentationPage user={user} onOpenNote={openDocumentationNote} />
     )}
     {visiblePage === "schedule" && <SchedulePage user={user} />}
+    {visiblePage === "mobile-care" && <MobileCarePage user={user} />}
     {visiblePage === "safety" && <SafetyPage />}
     {visiblePage === "users" && (user.capabilities.isSuperAdmin ? <AllUsersPage /> : <OrganizationUsersPage currentUserId={user.id} />)}
     {visiblePage === "clinic-settings" && <ClinicSettingsPage />}
@@ -244,5 +251,6 @@ export default function App() {
         : <ClientDetailPage clientNumber={selectedClientNumber} onBack={() => navigate("clients")} />
     )}
     {visiblePage === "credentials" && <CredentialDashboardPage />}
+    {visiblePage === "mobile-care-platform-defaults" && <MobileCarePlatformDefaultsPage />}
   </AppShell>;
 }

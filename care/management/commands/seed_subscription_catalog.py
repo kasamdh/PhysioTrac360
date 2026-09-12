@@ -22,6 +22,7 @@ FEATURES = [
     ("hep", "Home Exercise Program", "Home exercise program authoring and tracking."),
     ("outcome_measures", "Outcome Measures", "Standardized outcome-measure capture and trending."),
     ("crm", "CRM", "Lead and referral pipeline tracking."),
+    ("mobile_care", "In-Home PT", "In-home PT request intake, provider matching, and home-visit scheduling."),
 ]
 
 # (code, name, monthly_price, annual_price, provider_seat_limit, feature_codes)
@@ -35,7 +36,10 @@ PLANS = [
         499,
         4990,
         50,
-        ["hep", "outcome_measures", "billing", "claims", "crm", "ai_scribe", "telehealth", "advanced_analytics"],
+        [
+            "hep", "outcome_measures", "billing", "claims", "crm", "ai_scribe", "telehealth",
+            "advanced_analytics", "mobile_care",
+        ],
     ),
     ("custom", "Custom", 0, 0, 1, []),
 ]

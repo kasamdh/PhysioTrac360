@@ -25,6 +25,7 @@ export function PortalProfilePage() {
   const [pharmacyAddress, setPharmacyAddress] = useState("");
   const [preferredContactMethod, setPreferredContactMethod] = useState("email");
   const [emailNotificationsEnabled, setEmailNotificationsEnabled] = useState(true);
+  const [smsNotificationsEnabled, setSmsNotificationsEnabled] = useState(false);
   const [prefsError, setPrefsError] = useState("");
   const [prefsNotice, setPrefsNotice] = useState("");
   const [savingPrefs, setSavingPrefs] = useState(false);
@@ -42,6 +43,7 @@ export function PortalProfilePage() {
       setPharmacyAddress(result.profile.pharmacyAddress);
       setPreferredContactMethod(result.profile.preferredContactMethod);
       setEmailNotificationsEnabled(result.profile.emailNotificationsEnabled);
+      setSmsNotificationsEnabled(result.profile.smsNotificationsEnabled);
     } catch (requestError) {
       setError(requestMessage(requestError, "Unable to load your profile."));
     }
@@ -79,6 +81,7 @@ export function PortalProfilePage() {
         pharmacyAddress,
         preferredContactMethod,
         emailNotificationsEnabled,
+        smsNotificationsEnabled,
       });
       setPrefsNotice("Saved.");
       await load();
@@ -178,6 +181,15 @@ export function PortalProfilePage() {
               style={{ width: "auto" }}
             />
             Email me when I receive a new secure message
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: ".5rem" }}>
+            <input
+              type="checkbox"
+              checked={smsNotificationsEnabled}
+              onChange={(event) => setSmsNotificationsEnabled(event.target.checked)}
+              style={{ width: "auto" }}
+            />
+            Text me updates about my in-home PT visits (request received, therapist matched, visit reminders, provider on the way)
           </label>
 
           {prefsError && <p className="form-error" role="alert">{prefsError}</p>}

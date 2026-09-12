@@ -14,7 +14,7 @@ from django.db.models import Q
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
-from django.utils.dateparse import parse_datetime
+from django.utils.dateparse import parse_date, parse_datetime
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from ..access import (
@@ -1311,6 +1311,12 @@ def episodes_of_care(request, patient_id: str):
     diagnosis, error = _optional_text(payload, "diagnosis", limit=240)
     if error:
         return error
+    condition, error = _optional_text(payload, "condition", limit=240)
+    if error:
+        return error
+    visit_frequency, error = _optional_text(payload, "visitFrequency", limit=80)
+    if error:
+        return error
     notes, error = _optional_text(payload, "notes", limit=2000)
     if error:
         return error
@@ -1323,13 +1329,30 @@ def episodes_of_care(request, patient_id: str):
         primary_therapist = User.objects.filter(pk=therapist_id, organization=patient.organization).first()
         if not primary_therapist:
             return api_error("Choose a therapist from this organization.", status=400)
+    expected_end_date = None
+    if payload.get("expectedEndDate"):
+        expected_end_date = parse_date(str(payload["expectedEndDate"]))
+        if not expected_end_date:
+            return api_error("Choose a valid expected end date.", status=400)
+    expected_visit_count = payload.get("expectedVisitCount")
+    if expected_visit_count is not None:
+        try:
+            expected_visit_count = int(expected_visit_count)
+            if expected_visit_count <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            return api_error("Expected visit count must be a positive whole number.", status=400)
     episode = EpisodeOfCare(
         organization=patient.organization,
         patient=patient,
         primary_therapist=primary_therapist,
         diagnosis=diagnosis,
+        condition=condition,
         status=status,
         start_date=payload.get("startDate") or timezone.localdate(),
+        expected_end_date=expected_end_date,
+        visit_frequency=visit_frequency,
+        expected_visit_count=expected_visit_count,
         notes=notes,
         created_by=request.user,
     )

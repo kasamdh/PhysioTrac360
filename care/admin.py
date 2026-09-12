@@ -12,17 +12,27 @@ from .models import (
     FunctionalGoal,
     HomeExercise,
     HomeProgram,
+    HomeVisitAssignment,
+    HomeVisitAvailability,
     IntakeSubmission,
+    MobileCareRequest,
     NoteAddendum,
     Organization,
     OutcomeScore,
     PaymentRecord,
     Patient,
+    ProviderLocationSession,
+    ProviderLocationSnapshot,
+    ProviderMatch,
     SecureMessage,
+    ServiceArea,
     Superbill,
     User,
+    VisitTravelStatus,
     VoiceCapture,
 )
+
+admin.site.site_header = "Source Motion Administration"
 
 
 @admin.register(Organization)
@@ -107,6 +117,62 @@ class AuditEventAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+
+@admin.register(ServiceArea)
+class ServiceAreaAdmin(admin.ModelAdmin):
+    list_display = ("provider", "name", "organization", "is_active")
+    list_filter = ("organization", "is_active")
+    search_fields = ("name", "provider__first_name", "provider__last_name")
+
+
+@admin.register(HomeVisitAvailability)
+class HomeVisitAvailabilityAdmin(admin.ModelAdmin):
+    list_display = ("provider", "availability_type", "is_recurring", "day_of_week", "specific_date", "start_time", "end_time", "is_active")
+    list_filter = ("organization", "availability_type", "is_recurring", "is_active")
+    raw_id_fields = ("provider", "service_area")
+
+
+@admin.register(MobileCareRequest)
+class MobileCareRequestAdmin(admin.ModelAdmin):
+    list_display = ("patient", "organization", "zip_code", "status", "matched_provider", "earliest_date")
+    list_filter = ("organization", "status", "source")
+    search_fields = ("patient__first_name", "patient__last_name", "zip_code")
+    raw_id_fields = ("patient", "preferred_provider", "matched_provider", "episode_of_care", "appointment")
+
+
+@admin.register(ProviderMatch)
+class ProviderMatchAdmin(admin.ModelAdmin):
+    list_display = ("service_request", "provider", "rank", "status", "match_reason")
+    list_filter = ("organization", "status", "match_reason")
+    raw_id_fields = ("service_request", "provider")
+
+
+@admin.register(HomeVisitAssignment)
+class HomeVisitAssignmentAdmin(admin.ModelAdmin):
+    list_display = ("service_request", "provider", "status", "appointment")
+    list_filter = ("organization", "status")
+    raw_id_fields = ("service_request", "provider_match", "provider", "appointment")
+
+
+@admin.register(VisitTravelStatus)
+class VisitTravelStatusAdmin(admin.ModelAdmin):
+    list_display = ("assignment", "status", "created_at")
+    list_filter = ("status",)
+    raw_id_fields = ("assignment",)
+
+
+@admin.register(ProviderLocationSession)
+class ProviderLocationSessionAdmin(admin.ModelAdmin):
+    list_display = ("assignment", "started_at", "ended_at", "end_reason")
+    list_filter = ("end_reason",)
+    raw_id_fields = ("assignment",)
+
+
+@admin.register(ProviderLocationSnapshot)
+class ProviderLocationSnapshotAdmin(admin.ModelAdmin):
+    list_display = ("session", "latitude", "longitude", "created_at")
+    raw_id_fields = ("session",)
 
 
 admin.site.register(

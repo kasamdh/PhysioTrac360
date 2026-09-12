@@ -9,7 +9,9 @@ import { Select } from "@/components/ui/select";
 
 const NOTE_TYPES: { value: string; label: string }[] = [
   { value: "evaluation", label: "Initial Evaluation" },
-  { value: "daily", label: "Daily Treatment Note (SOAP)" },
+  { value: "daily", label: "Daily Treatment Note" },
+  { value: "soap", label: "SOAP Note" },
+  { value: "home_visit", label: "Home Visit Note" },
   { value: "progress", label: "Progress Note" },
   { value: "re_evaluation", label: "Re-evaluation" },
   { value: "discharge", label: "Discharge Summary" },
@@ -19,16 +21,17 @@ const NOTE_TYPES: { value: string; label: string }[] = [
 interface StartDocumentationDialogProps {
   initialPatient?: { id: string; fullName: string } | null;
   appointmentId?: string;
+  defaultNoteType?: string;
   onClose: () => void;
   onCreated: (note: NoteDetail) => void;
 }
 
-export function StartDocumentationDialog({ initialPatient, appointmentId, onClose, onCreated }: StartDocumentationDialogProps) {
+export function StartDocumentationDialog({ initialPatient, appointmentId, defaultNoteType, onClose, onCreated }: StartDocumentationDialogProps) {
   const [patient, setPatient] = useState<{ id: string; fullName: string } | null>(initialPatient ?? null);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<Patient[]>([]);
   const [searching, setSearching] = useState(false);
-  const [noteType, setNoteType] = useState("evaluation");
+  const [noteType, setNoteType] = useState(defaultNoteType || "evaluation");
   const [episodes, setEpisodes] = useState<EpisodeOfCare[]>([]);
   const [episodeOfCareId, setEpisodeOfCareId] = useState("");
   const [busy, setBusy] = useState(false);

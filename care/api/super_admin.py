@@ -33,6 +33,8 @@ from ..models import (
     UserLicense,
     UserSession,
 )
+from ..mobile_care_settings import PLATFORM_DEFAULT_FIELDS, get_platform_defaults, update_platform_defaults
+from .mobile_care import mobile_care_dashboard_data
 from ..privileged_access import ALLOWED_DURATIONS_HOURS, active_grant, request_privileged_access, revoke_privileged_access
 from ..services import outcome_trends, record_audit_event
 from ..user_management import apply_status_action, sweep_expired_licenses
@@ -1236,6 +1238,37 @@ def privileged_patient_detail(request, client_number: int, patient_id):
     )
 
 
+@require_GET
+@api_login_required
+def privileged_mobile_care_dashboard(request, client_number: int):
+    """Break-glass, read-only Mobile Care overview for one client — the
+    same time-boxed PrivilegedAccessGrant gate as privileged_patients()
+    above (no standing access; every view is audited). Always org-wide
+    (own_scope=False) — there is no "my own" scope for a platform
+    administrator, unlike the staff-facing dashboard's PT/PTA narrowing.
+    Reuses mobile_care_dashboard_data() so this is the exact same
+    computation a client's own admin would see, not a parallel one."""
+    try:
+        require_super_admin(request)
+    except PermissionDenied as exc:
+        return api_error(str(exc), status=403)
+    client = _client_or_404(client_number)
+    if not client:
+        return api_error("Client was not found.", status=404)
+    grant, error = _require_active_grant(client, request.user)
+    if error:
+        return error
+    data = mobile_care_dashboard_data(client, own_scope=False)
+    record_audit_event(
+        actor=request.user,
+        action="privileged_access.mobile_care_dashboard_viewed",
+        obj=grant,
+        request=request,
+        metadata={"client_number": client.client_number, "reason": grant.reason},
+    )
+    return JsonResponse(data)
+
+
 @require_POST
 @api_login_required
 def resend_admin_invitation(request, client_number: int):
@@ -1353,3 +1386,56 @@ def client_status(request, client_number: int, action: str):
         client = activate_client(client, request.user)
     else: return api_error("Unsupported client status action.", status=400)
     return JsonResponse({"client": serialize_client(client)})
+
+
+def serialize_mobile_care_platform_defaults(defaults) -> dict:
+    return {
+        "defaultVisitDurationMinutes": defaults.default_visit_duration_minutes,
+        "offerExpirationHours": defaults.offer_expiration_hours,
+        "patientCancellationWindowHours": defaults.patient_cancellation_window_hours,
+        "providerCancellationNoticeHours": defaults.provider_cancellation_notice_hours,
+        "maxTravelRadiusMiles": defaults.max_travel_radius_miles,
+        "sameProviderContinuityPreferred": defaults.same_provider_continuity_preferred,
+        "updatedAt": defaults.updated_at.isoformat(),
+    }
+
+
+_PLATFORM_DEFAULT_FIELD_FROM_PAYLOAD_KEY = {
+    "defaultVisitDurationMinutes": "default_visit_duration_minutes",
+    "offerExpirationHours": "offer_expiration_hours",
+    "patientCancellationWindowHours": "patient_cancellation_window_hours",
+    "providerCancellationNoticeHours": "provider_cancellation_notice_hours",
+    "maxTravelRadiusMiles": "max_travel_radius_miles",
+    "sameProviderContinuityPreferred": "same_provider_continuity_preferred",
+}
+assert set(_PLATFORM_DEFAULT_FIELD_FROM_PAYLOAD_KEY.values()) == set(PLATFORM_DEFAULT_FIELDS)
+
+
+@require_http_methods(["GET", "PATCH"])
+@api_login_required
+def mobile_care_platform_defaults(request):
+    """Platform-wide Mobile Care defaults — Super Admin only, no tenant
+    scope at all (see care/models.py's MobileCarePlatformDefaults). Every
+    organization's own MobileCareConfiguration overrides these field by
+    field; this is the value it falls back to until it does."""
+    try:
+        require_super_admin(request)
+    except PermissionDenied as exc:
+        return api_error(str(exc), status=403)
+    if request.method == "GET":
+        return JsonResponse({"platformDefaults": serialize_mobile_care_platform_defaults(get_platform_defaults())})
+
+    try:
+        payload = json_body(request)
+    except ValueError:
+        return api_error("Invalid JSON body.", status=400)
+    changes = {
+        field_name: payload[payload_key]
+        for payload_key, field_name in _PLATFORM_DEFAULT_FIELD_FROM_PAYLOAD_KEY.items()
+        if payload_key in payload
+    }
+    try:
+        defaults = update_platform_defaults(changes, actor=request.user, django_request=request)
+    except ValidationError as exc:
+        return api_error(exc.messages[0] if exc.messages else "Unable to save these defaults.", status=422)
+    return JsonResponse({"platformDefaults": serialize_mobile_care_platform_defaults(defaults)})

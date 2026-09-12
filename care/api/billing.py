@@ -24,6 +24,7 @@ from ..billing_services import build_cms1500_data, build_patient_statement_data,
 from ..clearinghouse import get_clearinghouse_adapter
 from ..entitlements import organization_has_feature
 from ..models import (
+    Appointment,
     CashPackage,
     Charge,
     Claim,
@@ -1661,6 +1662,10 @@ def serialize_service_price(price: ServicePrice) -> dict:
         "label": price.label,
         "price": str(price.price),
         "isActive": price.is_active,
+        "homeVisitKind": price.home_visit_kind or None,
+        "homeVisitKindLabel": price.get_home_visit_kind_display() if price.home_visit_kind else None,
+        "isHomeVisitTravelFee": price.is_home_visit_travel_fee,
+        "depositAmount": str(price.deposit_amount) if price.deposit_amount is not None else None,
         "createdAt": price.created_at.isoformat(),
     }
 
@@ -1693,10 +1698,18 @@ def service_prices(request):
         price_value, ok = _parse_decimal(payload.get("price"))
         if not ok or price_value is None or price_value <= 0:
             errors["price"] = "Enter a price greater than zero."
+        home_visit_kind = str(payload.get("homeVisitKind") or "").strip()
+        if home_visit_kind and home_visit_kind not in Appointment.Kind.values:
+            errors["homeVisitKind"] = "Choose a valid visit kind."
+        deposit_amount, deposit_ok = _parse_decimal(payload.get("depositAmount"))
+        if not deposit_ok:
+            errors["depositAmount"] = "Enter a valid deposit amount."
         if errors:
             return api_validation_error(errors)
         service_price = ServicePrice(
-            organization=organization, cpt_code=cpt_code, label=label, price=price_value, created_by=request.user
+            organization=organization, cpt_code=cpt_code, label=label, price=price_value, created_by=request.user,
+            home_visit_kind=home_visit_kind, is_home_visit_travel_fee=bool(payload.get("isHomeVisitTravelFee")),
+            deposit_amount=deposit_amount,
         )
         try:
             service_price.full_clean()
@@ -1753,6 +1766,18 @@ def service_price_detail(request, price_id):
         service_price.price = value
     if "isActive" in payload:
         service_price.is_active = bool(payload["isActive"])
+    if "homeVisitKind" in payload:
+        home_visit_kind = str(payload["homeVisitKind"] or "").strip()
+        if home_visit_kind and home_visit_kind not in Appointment.Kind.values:
+            return api_validation_error({"homeVisitKind": "Choose a valid visit kind."})
+        service_price.home_visit_kind = home_visit_kind
+    if "isHomeVisitTravelFee" in payload:
+        service_price.is_home_visit_travel_fee = bool(payload["isHomeVisitTravelFee"])
+    if "depositAmount" in payload:
+        value, ok = _parse_decimal(payload["depositAmount"])
+        if not ok:
+            return api_validation_error({"depositAmount": "Enter a valid deposit amount."})
+        service_price.deposit_amount = value
     try:
         service_price.full_clean()
     except ValidationError as exc:

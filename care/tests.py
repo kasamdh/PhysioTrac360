@@ -37,9 +37,14 @@ from .models import (
     HomeExercise,
     HomeExerciseLog,
     HomeProgram,
+    HomeVisitAssignment,
+    HomeVisitAvailability,
     IntakeSubmission,
     Location,
     LocationClosure,
+    MobileCareConfiguration,
+    MobileCarePlatformDefaults,
+    MobileCareRequest,
     NoteAddendum,
     NoteIntervention,
     Organization,
@@ -58,17 +63,75 @@ from .models import (
     Provider,
     ProviderAppointmentType,
     ProviderAvailability,
+    ProviderLocationSession,
+    ProviderLocationSnapshot,
+    ProviderMatch,
     ProviderTimeOff,
     Referral,
     SecureMessage,
+    ServiceArea,
+    ServiceAreaZipCode,
     ServicePrice,
     SubscriptionPlan,
     Superbill,
     User,
     UserLicense,
     UserSession,
+    VisitTravelStatus,
     Waitlist,
 )
+from .mobile_care import (
+    ASSIGNMENT_STATUS_TRANSITIONS,
+    DEFAULT_OFFER_EXPIRATION_HOURS,
+    EligibilityReason,
+    build_directions_url_for_address,
+    build_visit_directions_url,
+    cancel_request,
+    check_provider_eligibility,
+    close_location_session,
+    create_request,
+    estimate_assignment_arrival,
+    estimate_provider_distance,
+    expire_stale_offers,
+    generate_matches,
+    geocode_mobile_care_request,
+    geocode_service_area,
+    match_provider,
+    offer_match,
+    open_location_session,
+    rank_eligible_providers,
+    record_location_snapshot,
+    respond_to_match,
+    schedule_assignment,
+    set_location_sharing,
+    update_assignment_status,
+)
+from .mobile_care_billing import (
+    add_travel_charge,
+    create_home_visit_service_charge,
+    estimate_home_visit_charges,
+    home_visit_price_quote,
+)
+from .mobile_care_settings import (
+    effective_continuity_preferred,
+    effective_default_visit_duration_minutes,
+    effective_match_weights,
+    effective_max_travel_radius_miles,
+    effective_offer_expiration_hours,
+    effective_patient_cancellation_window_hours,
+    effective_provider_cancellation_notice_hours,
+    effective_service_hours,
+    get_configuration,
+    get_platform_defaults,
+    is_mobile_care_enabled,
+    is_notification_event_enabled,
+    is_provider_role_allowed,
+    is_requested_service_available,
+    update_configuration,
+    update_platform_defaults,
+)
+from .booking import ChangeCutoffError, cancel_portal_appointment
+from . import mapping, mobile_care_notifications
 from .services import (
     coding_suggestions,
     compose_draft,
@@ -2517,6 +2580,77 @@ class ClinicalWorkflowTests(TestCase):
             content_type="application/json",
         )
         self.assertEqual(response.status_code, 403)
+
+    # --- Break-glass Mobile Care access (closes the "no path at all" gap ---
+    # --- flagged during the Module 20 security review) --------------------
+
+    def test_privileged_mobile_care_dashboard_requires_a_grant(self):
+        platform_admin = self._platform_admin()
+        self.organization.client_number = 6008
+        self.organization.save(update_fields=["client_number"])
+        self.client.force_login(platform_admin)
+        response = self.client.get(
+            reverse("api-super-admin-privileged-mobile-care-dashboard", kwargs={"client_number": self.organization.client_number})
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["code"], "PRIVILEGED_ACCESS_REQUIRED")
+
+    def test_privileged_mobile_care_dashboard_returns_org_wide_data_and_is_audited(self):
+        platform_admin = self._platform_admin()
+        self.organization.client_number = 6009
+        self.organization.save(update_fields=["client_number"])
+        MobileCareRequest.objects.create(
+            organization=self.organization, patient=self.patient,
+            address_line_1="1 Break Glass Ln", city="Cary", state="NC", zip_code="27526",
+            earliest_date=date.today() + timedelta(days=3),
+        )
+        self.client.force_login(platform_admin)
+        self.client.post(
+            reverse("api-super-admin-privileged-access", kwargs={"client_number": self.organization.client_number}),
+            data=json.dumps({"reason": "Investigating a Mobile Care support ticket.", "durationHours": 4}),
+            content_type="application/json",
+        )
+
+        response = self.client.get(
+            reverse("api-super-admin-privileged-mobile-care-dashboard", kwargs={"client_number": self.organization.client_number})
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["cardCounts"]["pendingRequests"], 1)
+        self.assertTrue(
+            AuditEvent.objects.filter(actor=platform_admin, action="privileged_access.mobile_care_dashboard_viewed").exists()
+        )
+
+    def test_privileged_mobile_care_dashboard_is_tenant_scoped_to_the_granted_client(self):
+        platform_admin = self._platform_admin()
+        self.organization.client_number = 6010
+        self.organization.save(update_fields=["client_number"])
+        other_org = Organization.objects.create(name="Other Break Glass Org", slug="other-break-glass-org", client_number=6011)
+        other_patient = Patient.objects.create(
+            organization=other_org, first_name="Other", last_name="Patient", date_of_birth="1990-01-01",
+        )
+        MobileCareRequest.objects.create(
+            organization=other_org, patient=other_patient,
+            address_line_1="2 Other Ln", city="Cary", state="NC", zip_code="27526",
+            earliest_date=date.today() + timedelta(days=3),
+        )
+        self.client.force_login(platform_admin)
+        self.client.post(
+            reverse("api-super-admin-privileged-access", kwargs={"client_number": self.organization.client_number}),
+            data=json.dumps({"reason": "Investigating this client only.", "durationHours": 1}),
+            content_type="application/json",
+        )
+
+        # A grant for self.organization must not expose other_org's data.
+        cross_client_response = self.client.get(
+            reverse("api-super-admin-privileged-mobile-care-dashboard", kwargs={"client_number": other_org.client_number})
+        )
+        self.assertEqual(cross_client_response.status_code, 403)
+
+        own_client_response = self.client.get(
+            reverse("api-super-admin-privileged-mobile-care-dashboard", kwargs={"client_number": self.organization.client_number})
+        )
+        self.assertEqual(own_client_response.status_code, 200)
+        self.assertEqual(own_client_response.json()["cardCounts"]["pendingRequests"], 0)
 
     def test_scheduling_role_can_create_a_patient_without_clinical_fields(self):
         scheduler = User.objects.create_user(
@@ -10483,3 +10617,4352 @@ class PatientPortalDedicatedIdorAuditTests(TestCase):
         self.assertEqual(documents_response.json()["documents"], [])
         self.assertEqual(appointments_response.json()["upcoming"], [])
         self.assertIsNone(hep_response.json()["program"])
+
+
+class HomeVisitAvailabilityTests(TestCase):
+    """Provider availability for in-home visits — care/api/mobile_care.py's
+    home_visit_availability_list/detail. Covers the explicit authorization
+    matrix (own provider vs admin vs cross-provider vs cross-tenant), the
+    audit trail, and the model-level date/day validation."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Availability PT", slug="availability-pt")
+        self.other_org = Organization.objects.create(name="Other Org PT", slug="other-org-pt")
+
+        self.admin = User.objects.create_user(
+            username="availability-admin", password="safe-test-password", organization=self.org, role=User.Role.ADMIN,
+        )
+        self.therapist_user = User.objects.create_user(
+            username="availability-therapist", password="safe-test-password", organization=self.org, role=User.Role.THERAPIST,
+        )
+        self.other_therapist_user = User.objects.create_user(
+            username="availability-other-therapist", password="safe-test-password", organization=self.org, role=User.Role.THERAPIST,
+        )
+        self.scheduler_user = User.objects.create_user(
+            username="availability-scheduler", password="safe-test-password", organization=self.org, role=User.Role.SCHEDULER,
+        )
+
+        self.provider = Provider.objects.create(
+            organization=self.org, user=self.therapist_user, first_name="Amanda", last_name="Rivera",
+        )
+        self.other_provider = Provider.objects.create(
+            organization=self.org, user=self.other_therapist_user, first_name="Jordan", last_name="Lee",
+        )
+
+        self.other_org_admin = User.objects.create_user(
+            username="other-org-admin", password="safe-test-password", organization=self.other_org, role=User.Role.ADMIN,
+        )
+        other_org_therapist_user = User.objects.create_user(
+            username="other-org-therapist", password="safe-test-password", organization=self.other_org, role=User.Role.THERAPIST,
+        )
+        self.other_org_provider = Provider.objects.create(
+            organization=self.other_org, user=other_org_therapist_user, first_name="Cross", last_name="Tenant",
+        )
+
+        self.list_url = reverse("api-mobile-care-availability-list")
+
+    def _detail_url(self, availability_id):
+        return reverse("api-mobile-care-availability-detail", kwargs={"availability_id": availability_id})
+
+    def _payload(self, **overrides):
+        payload = {
+            "availabilityType": "available",
+            "isRecurring": True,
+            "dayOfWeek": 0,
+            "startTime": "17:00",
+            "endTime": "21:00",
+            "notes": "Evenings only",
+        }
+        payload.update(overrides)
+        return payload
+
+    # --- Ownership / admin authorization ------------------------------------
+
+    def test_provider_can_create_own_availability(self):
+        self.client.force_login(self.therapist_user)
+        response = self.client.post(self.list_url, data=json.dumps(self._payload()), content_type="application/json")
+        self.assertEqual(response.status_code, 201)
+        row = HomeVisitAvailability.objects.get(pk=response.json()["availability"]["id"])
+        self.assertEqual(row.provider_id, self.provider.pk)
+        self.assertEqual(row.created_by_id, self.therapist_user.id)
+
+    def test_provider_cannot_create_availability_for_another_provider(self):
+        """A non-admin's providerId is ignored — the row always lands on
+        their own provider, never one named in the payload."""
+        self.client.force_login(self.therapist_user)
+        response = self.client.post(
+            self.list_url,
+            data=json.dumps(self._payload(providerId=str(self.other_provider.pk))),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 201)
+        row = HomeVisitAvailability.objects.get(pk=response.json()["availability"]["id"])
+        self.assertEqual(row.provider_id, self.provider.pk)
+
+    def test_admin_can_create_availability_for_any_provider_in_org(self):
+        self.client.force_login(self.admin)
+        response = self.client.post(
+            self.list_url,
+            data=json.dumps(self._payload(providerId=str(self.other_provider.pk))),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 201)
+        row = HomeVisitAvailability.objects.get(pk=response.json()["availability"]["id"])
+        self.assertEqual(row.provider_id, self.other_provider.pk)
+
+    def test_provider_cannot_edit_another_providers_availability(self):
+        row = HomeVisitAvailability.objects.create(
+            organization=self.org, provider=self.other_provider, day_of_week=0, start_time="09:00", end_time="12:00",
+        )
+        self.client.force_login(self.therapist_user)
+        response = self.client.patch(
+            self._detail_url(row.pk), data=json.dumps({"notes": "trying to edit"}), content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 403)
+        row.refresh_from_db()
+        self.assertEqual(row.notes, "")
+
+    def test_provider_cannot_view_another_providers_availability(self):
+        row = HomeVisitAvailability.objects.create(
+            organization=self.org, provider=self.other_provider, day_of_week=0, start_time="09:00", end_time="12:00",
+        )
+        self.client.force_login(self.therapist_user)
+        response = self.client.get(self._detail_url(row.pk))
+        self.assertEqual(response.status_code, 403)
+
+    def test_provider_list_only_shows_own_rows(self):
+        HomeVisitAvailability.objects.create(
+            organization=self.org, provider=self.provider, day_of_week=0, start_time="09:00", end_time="12:00",
+        )
+        HomeVisitAvailability.objects.create(
+            organization=self.org, provider=self.other_provider, day_of_week=1, start_time="09:00", end_time="12:00",
+        )
+        self.client.force_login(self.therapist_user)
+        response = self.client.get(self.list_url)
+        self.assertEqual(response.status_code, 200)
+        rows = response.json()["availability"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["providerId"], str(self.provider.pk))
+
+    def test_admin_can_edit_any_provider_availability_in_org(self):
+        row = HomeVisitAvailability.objects.create(
+            organization=self.org, provider=self.other_provider, day_of_week=0, start_time="09:00", end_time="12:00",
+        )
+        self.client.force_login(self.admin)
+        response = self.client.patch(
+            self._detail_url(row.pk), data=json.dumps({"notes": "admin edit"}), content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        row.refresh_from_db()
+        self.assertEqual(row.notes, "admin edit")
+        self.assertEqual(row.updated_by_id, self.admin.id)
+
+    def test_scheduler_role_has_no_access(self):
+        self.client.force_login(self.scheduler_user)
+        response = self.client.get(self.list_url)
+        self.assertEqual(response.status_code, 403)
+
+    # --- Tenant isolation -----------------------------------------------------
+
+    def test_cross_tenant_access_denied(self):
+        row = HomeVisitAvailability.objects.create(
+            organization=self.other_org, provider=self.other_org_provider, day_of_week=0, start_time="09:00", end_time="12:00",
+        )
+        self.client.force_login(self.admin)
+        response = self.client.get(self._detail_url(row.pk))
+        self.assertEqual(response.status_code, 404)
+
+    def test_admin_cannot_create_for_provider_in_another_org(self):
+        self.client.force_login(self.admin)
+        response = self.client.post(
+            self.list_url,
+            data=json.dumps(self._payload(providerId=str(self.other_org_provider.pk))),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(HomeVisitAvailability.objects.filter(provider=self.other_org_provider).exists())
+
+    # --- Audit trail ------------------------------------------------------------
+
+    def test_create_update_deactivate_are_audited(self):
+        self.client.force_login(self.therapist_user)
+        create_response = self.client.post(self.list_url, data=json.dumps(self._payload()), content_type="application/json")
+        availability_id = create_response.json()["availability"]["id"]
+        self.assertTrue(
+            AuditEvent.objects.filter(action="home_visit_availability.created", object_id=availability_id, actor=self.therapist_user).exists()
+        )
+
+        self.client.patch(
+            self._detail_url(availability_id), data=json.dumps({"notes": "updated"}), content_type="application/json",
+        )
+        self.assertTrue(
+            AuditEvent.objects.filter(action="home_visit_availability.updated", object_id=availability_id, actor=self.therapist_user).exists()
+        )
+
+        self.client.delete(self._detail_url(availability_id))
+        self.assertTrue(
+            AuditEvent.objects.filter(action="home_visit_availability.deactivated", object_id=availability_id, actor=self.therapist_user).exists()
+        )
+
+    # --- Validation ---------------------------------------------------------
+
+    def test_recurring_without_day_of_week_rejected(self):
+        self.client.force_login(self.therapist_user)
+        payload = self._payload(dayOfWeek=None)
+        response = self.client.post(self.list_url, data=json.dumps(payload), content_type="application/json")
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("day_of_week", response.json()["errors"])
+
+    def test_one_time_without_specific_date_rejected(self):
+        self.client.force_login(self.therapist_user)
+        payload = self._payload(isRecurring=False, dayOfWeek=None)
+        response = self.client.post(self.list_url, data=json.dumps(payload), content_type="application/json")
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("specific_date", response.json()["errors"])
+
+    def test_one_time_with_specific_date_succeeds(self):
+        self.client.force_login(self.therapist_user)
+        payload = self._payload(isRecurring=False, dayOfWeek=None, specificDate="2026-12-25")
+        response = self.client.post(self.list_url, data=json.dumps(payload), content_type="application/json")
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["availability"]["specificDate"], "2026-12-25")
+
+    def test_end_time_before_start_time_rejected(self):
+        self.client.force_login(self.therapist_user)
+        payload = self._payload(startTime="21:00", endTime="17:00")
+        response = self.client.post(self.list_url, data=json.dumps(payload), content_type="application/json")
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("end_time", response.json()["errors"])
+
+    def test_effective_until_before_effective_from_rejected(self):
+        self.client.force_login(self.therapist_user)
+        payload = self._payload(effectiveFrom="2026-06-01", effectiveUntil="2026-01-01")
+        response = self.client.post(self.list_url, data=json.dumps(payload), content_type="application/json")
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("effective_until", response.json()["errors"])
+
+    def test_service_area_must_belong_to_same_provider(self):
+        foreign_area = ServiceArea.objects.create(organization=self.org, provider=self.other_provider, name="Not mine")
+        self.client.force_login(self.therapist_user)
+        payload = self._payload(serviceAreaId=str(foreign_area.pk))
+        response = self.client.post(self.list_url, data=json.dumps(payload), content_type="application/json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_availability_type_supports_available_unavailable_blocked(self):
+        self.client.force_login(self.therapist_user)
+        for value in ("available", "unavailable", "blocked"):
+            response = self.client.post(
+                self.list_url, data=json.dumps(self._payload(availabilityType=value, dayOfWeek=1)), content_type="application/json",
+            )
+            self.assertEqual(response.status_code, 201, value)
+            self.assertEqual(response.json()["availability"]["availabilityType"], value)
+
+    def test_deactivate_then_reactivate(self):
+        self.client.force_login(self.therapist_user)
+        create_response = self.client.post(self.list_url, data=json.dumps(self._payload()), content_type="application/json")
+        availability_id = create_response.json()["availability"]["id"]
+
+        delete_response = self.client.delete(self._detail_url(availability_id))
+        self.assertEqual(delete_response.status_code, 200)
+        self.assertFalse(delete_response.json()["availability"]["isActive"])
+
+        reactivate_response = self.client.patch(
+            self._detail_url(availability_id), data=json.dumps({"isActive": True}), content_type="application/json",
+        )
+        self.assertEqual(reactivate_response.status_code, 200)
+        self.assertTrue(reactivate_response.json()["availability"]["isActive"])
+
+
+class ProviderServiceAreaTests(TestCase):
+    """Provider Service Area (the radius/city/state fields on ServiceArea) —
+    care/api/mobile_care.py's service_areas/service_area_detail. Covers
+    creation, edit, deactivate, tenant isolation, invalid-organization
+    rejection, and the state-licensing eligibility rule."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Service Area PT", slug="service-area-pt")
+        self.other_org = Organization.objects.create(name="Other Org PT", slug="service-area-other-org")
+
+        self.admin = User.objects.create_user(
+            username="service-area-admin", password="safe-test-password", organization=self.org, role=User.Role.ADMIN,
+        )
+        self.scheduler = User.objects.create_user(
+            username="service-area-scheduler", password="safe-test-password", organization=self.org, role=User.Role.SCHEDULER,
+        )
+        self.provider_user = User.objects.create_user(
+            username="service-area-provider", password="safe-test-password", organization=self.org, role=User.Role.THERAPIST,
+        )
+        self.provider = Provider.objects.create(
+            organization=self.org, user=self.provider_user, first_name="Sarah", last_name="Miller", credentials="PT, DPT",
+        )
+        UserLicense.objects.create(
+            user=self.provider_user, license_number="NC-1001", issuing_state="NC",
+            expires_at=date.today() + timedelta(days=365),
+        )
+
+        other_org_user = User.objects.create_user(
+            username="service-area-other-org-provider", password="safe-test-password", organization=self.other_org, role=User.Role.THERAPIST,
+        )
+        self.other_org_provider = Provider.objects.create(
+            organization=self.other_org, user=other_org_user, first_name="Cross", last_name="Tenant",
+        )
+
+        self.list_url = reverse("api-mobile-care-service-areas")
+
+    def _detail_url(self, service_area_id):
+        return reverse("api-mobile-care-service-area-detail", kwargs={"service_area_id": service_area_id})
+
+    def _payload(self, **overrides):
+        payload = {
+            "providerId": str(self.provider.pk),
+            "name": "Primary coverage",
+            "primaryZipCode": "27526",
+            "city": "Fuquay-Varina",
+            "state": "NC",
+            "radiusMiles": 15,
+        }
+        payload.update(overrides)
+        return payload
+
+    # --- Creation / edit / deactivate ---------------------------------------
+
+    def test_admin_can_create_service_area(self):
+        self.client.force_login(self.admin)
+        response = self.client.post(self.list_url, data=json.dumps(self._payload()), content_type="application/json")
+        self.assertEqual(response.status_code, 201)
+        body = response.json()["serviceArea"]
+        self.assertEqual(body["primaryZipCode"], "27526")
+        self.assertEqual(body["city"], "Fuquay-Varina")
+        self.assertEqual(body["state"], "NC")
+        self.assertEqual(body["radiusMiles"], 15)
+        self.assertTrue(body["isEligible"])
+        row = ServiceArea.objects.get(pk=body["id"])
+        self.assertEqual(row.created_by_id, self.admin.id)
+
+    def test_non_admin_cannot_create_service_area(self):
+        self.client.force_login(self.scheduler)
+        response = self.client.post(self.list_url, data=json.dumps(self._payload()), content_type="application/json")
+        self.assertEqual(response.status_code, 403)
+
+    def test_admin_can_edit_service_area(self):
+        self.client.force_login(self.admin)
+        create_response = self.client.post(self.list_url, data=json.dumps(self._payload()), content_type="application/json")
+        area_id = create_response.json()["serviceArea"]["id"]
+
+        response = self.client.patch(
+            self._detail_url(area_id), data=json.dumps({"radiusMiles": 25, "city": "Holly Springs"}), content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()["serviceArea"]
+        self.assertEqual(body["radiusMiles"], 25)
+        self.assertEqual(body["city"], "Holly Springs")
+        row = ServiceArea.objects.get(pk=area_id)
+        self.assertEqual(row.updated_by_id, self.admin.id)
+
+    def test_deactivate_and_reactivate_service_area(self):
+        self.client.force_login(self.admin)
+        create_response = self.client.post(self.list_url, data=json.dumps(self._payload()), content_type="application/json")
+        area_id = create_response.json()["serviceArea"]["id"]
+
+        delete_response = self.client.delete(self._detail_url(area_id))
+        self.assertEqual(delete_response.status_code, 200)
+        self.assertFalse(delete_response.json()["serviceArea"]["isActive"])
+
+        second_delete = self.client.delete(self._detail_url(area_id))
+        self.assertEqual(second_delete.status_code, 409)
+
+        reactivate_response = self.client.patch(
+            self._detail_url(area_id), data=json.dumps({"isActive": True}), content_type="application/json",
+        )
+        self.assertEqual(reactivate_response.status_code, 200)
+        self.assertTrue(reactivate_response.json()["serviceArea"]["isActive"])
+
+    def test_multiple_service_areas_per_provider(self):
+        self.client.force_login(self.admin)
+        first = self.client.post(self.list_url, data=json.dumps(self._payload(name="Weekday zone")), content_type="application/json")
+        second = self.client.post(
+            self.list_url, data=json.dumps(self._payload(name="Weekend zone", primaryZipCode="27603", radiusMiles=25)),
+            content_type="application/json",
+        )
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 201)
+        self.assertEqual(ServiceArea.objects.filter(provider=self.provider).count(), 2)
+
+    # --- Tenant isolation / invalid organization -----------------------------
+
+    def test_cross_tenant_access_denied(self):
+        area = ServiceArea.objects.create(organization=self.other_org, provider=self.other_org_provider, name="Cross tenant zone")
+        self.client.force_login(self.admin)
+        response = self.client.get(self._detail_url(area.pk))
+        self.assertEqual(response.status_code, 404)
+
+    def test_invalid_organization_provider_rejected(self):
+        """A provider belonging to a different organization cannot be used
+        to create a service area, even by an authenticated admin."""
+        self.client.force_login(self.admin)
+        response = self.client.post(
+            self.list_url, data=json.dumps(self._payload(providerId=str(self.other_org_provider.pk))), content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(ServiceArea.objects.filter(provider=self.other_org_provider).exists())
+
+    # --- Eligibility ----------------------------------------------------------
+
+    def test_expired_provider_excluded_from_eligible_list(self):
+        UserLicense.objects.filter(user=self.provider_user).update(expires_at=date.today() - timedelta(days=1))
+        self.client.force_login(self.admin)
+        create_response = self.client.post(self.list_url, data=json.dumps(self._payload()), content_type="application/json")
+        self.assertEqual(create_response.status_code, 201)
+        body = create_response.json()["serviceArea"]
+        self.assertFalse(body["isEligible"])
+        self.assertIn("license", body["ineligibilityReason"].lower())
+
+        eligible_response = self.client.get(self.list_url + "?eligibleOnly=true")
+        self.assertEqual(eligible_response.json()["serviceAreas"], [])
+
+        all_response = self.client.get(self.list_url)
+        self.assertEqual(len(all_response.json()["serviceAreas"]), 1)
+
+    def test_provider_without_license_for_area_state_is_ineligible(self):
+        self.client.force_login(self.admin)
+        response = self.client.post(
+            self.list_url, data=json.dumps(self._payload(state="SC")), content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 201)
+        body = response.json()["serviceArea"]
+        self.assertFalse(body["isEligible"])
+        self.assertIn("SC", body["ineligibilityReason"])
+
+    def test_provider_with_matching_state_license_is_eligible(self):
+        self.client.force_login(self.admin)
+        response = self.client.post(self.list_url, data=json.dumps(self._payload(state="NC")), content_type="application/json")
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(response.json()["serviceArea"]["isEligible"])
+
+    def test_suspended_provider_account_is_ineligible(self):
+        self.provider_user.status = User.Status.SUSPENDED
+        self.provider_user.save(update_fields=["status"])
+        self.client.force_login(self.admin)
+        response = self.client.post(self.list_url, data=json.dumps(self._payload()), content_type="application/json")
+        self.assertEqual(response.status_code, 201)
+        self.assertFalse(response.json()["serviceArea"]["isEligible"])
+
+    # --- Audit trail ------------------------------------------------------------
+
+    def test_create_update_deactivate_are_audited(self):
+        self.client.force_login(self.admin)
+        create_response = self.client.post(self.list_url, data=json.dumps(self._payload()), content_type="application/json")
+        area_id = create_response.json()["serviceArea"]["id"]
+        self.assertTrue(AuditEvent.objects.filter(action="service_area.created", object_id=area_id, actor=self.admin).exists())
+
+        self.client.patch(self._detail_url(area_id), data=json.dumps({"city": "Raleigh"}), content_type="application/json")
+        self.assertTrue(AuditEvent.objects.filter(action="service_area.updated", object_id=area_id, actor=self.admin).exists())
+
+        self.client.delete(self._detail_url(area_id))
+        self.assertTrue(AuditEvent.objects.filter(action="service_area.deactivated", object_id=area_id, actor=self.admin).exists())
+
+    # --- Validation ---------------------------------------------------------
+
+    def test_radius_must_be_positive(self):
+        self.client.force_login(self.admin)
+        response = self.client.post(self.list_url, data=json.dumps(self._payload(radiusMiles=0)), content_type="application/json")
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("radius_miles", response.json()["errors"])
+
+
+class PatientServiceRequestTests(TestCase):
+    """Patient Service Request (MobileCareRequest) — create/edit/cancel/list/
+    detail/status-history, on both the staff side (care/api/mobile_care.py)
+    and the patient portal side (care/api/patient_portal.py). Covers the new
+    descriptive fields, edit-before-assignment, staff cancel (vs. decline),
+    tenant isolation, and organization validation."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Service Request PT", slug="service-request-pt")
+        self.other_org = Organization.objects.create(name="Other Org PT", slug="service-request-other-org")
+
+        self.admin = User.objects.create_user(
+            username="sr-admin", password="safe-test-password", organization=self.org, role=User.Role.ADMIN,
+        )
+        self.scheduler = User.objects.create_user(
+            username="sr-scheduler", password="safe-test-password", organization=self.org, role=User.Role.SCHEDULER,
+        )
+        self.patient = Patient.objects.create(
+            organization=self.org, first_name="River", last_name="Chen", date_of_birth=date(1985, 4, 12),
+            address="12 Existing Chart Address, Cary, NC 27511",
+        )
+        self.other_org_patient = Patient.objects.create(
+            organization=self.other_org, first_name="Cross", last_name="Tenant", date_of_birth=date(1990, 1, 1),
+        )
+
+        portal_user = User.objects.create_user(
+            username="sr-portal-patient", password="safe-test-password", organization=self.org, role=User.Role.PATIENT,
+        )
+        self.patient.portal_user = portal_user
+        self.patient.save(update_fields=["portal_user"])
+        self.portal_user = portal_user
+
+        self.provider_user = User.objects.create_user(
+            username="sr-provider", password="safe-test-password", organization=self.org, role=User.Role.THERAPIST,
+        )
+        self.provider = Provider.objects.create(organization=self.org, user=self.provider_user, first_name="Amanda", last_name="Rivera")
+
+        self.create_url = reverse("api-mobile-care-request-create", kwargs={"patient_id": str(self.patient.pk)})
+        self.list_url = reverse("api-mobile-care-request-list")
+        self.portal_list_url = reverse("api-portal-mobile-care-requests")
+
+    def _detail_url(self, request_id):
+        return reverse("api-mobile-care-request-detail", kwargs={"request_id": request_id})
+
+    def _cancel_url(self, request_id):
+        return reverse("api-mobile-care-request-cancel", kwargs={"request_id": request_id})
+
+    def _history_url(self, request_id):
+        return reverse("api-mobile-care-request-status-history", kwargs={"request_id": request_id})
+
+    def _portal_detail_url(self, request_id):
+        return reverse("api-portal-mobile-care-request-detail", kwargs={"request_id": request_id})
+
+    def _payload(self, **overrides):
+        payload = {
+            "addressLine1": "1 Visit St",
+            "city": "Cary",
+            "state": "NC",
+            "zipCode": "27511",
+            "earliestDate": date.today().isoformat(),
+            "requestedService": "evaluation",
+            "specialtyRequested": "Orthopedic PT",
+            "preferredTimeWindow": "morning",
+            "primaryCondition": "Post-op knee replacement",
+            "providerGenderPreference": "no_preference",
+            "isNewPatient": True,
+            "paymentMethod": "insurance",
+            "mobilityNotes": "Uses a walker",
+            "homeAccessNotes": "Gate code 4821",
+            "notes": "Please call ahead",
+        }
+        payload.update(overrides)
+        return payload
+
+    # --- Creation -------------------------------------------------------------
+
+    def test_staff_can_create_service_request_with_all_fields(self):
+        self.client.force_login(self.admin)
+        response = self.client.post(self.create_url, data=json.dumps(self._payload()), content_type="application/json")
+        self.assertEqual(response.status_code, 201)
+        body = response.json()["request"]
+        self.assertEqual(body["status"], "pending")
+        self.assertEqual(body["statusLabel"], "Requested")
+        self.assertEqual(body["requestedService"], "evaluation")
+        self.assertEqual(body["specialtyRequested"], "Orthopedic PT")
+        self.assertEqual(body["preferredTimeWindow"], "morning")
+        self.assertEqual(body["primaryCondition"], "Post-op knee replacement")
+        self.assertTrue(body["isNewPatient"])
+        self.assertEqual(body["paymentMethod"], "insurance")
+        self.assertEqual(body["mobilityNotes"], "Uses a walker")
+        self.assertEqual(body["homeAccessNotes"], "Gate code 4821")
+        self.assertTrue(body["canEdit"])
+        self.assertTrue(body["canCancel"])
+        row = MobileCareRequest.objects.get(pk=body["id"])
+        self.assertEqual(row.created_by_id, self.admin.id)
+        self.assertEqual(row.organization_id, self.org.id)
+
+    def test_create_with_preferred_provider(self):
+        self.client.force_login(self.admin)
+        response = self.client.post(
+            self.create_url, data=json.dumps(self._payload(preferredProviderId=str(self.provider.pk))), content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["request"]["preferredProviderId"], str(self.provider.pk))
+        self.assertEqual(response.json()["request"]["preferredProviderName"], "Amanda Rivera")
+
+    def test_create_rejects_invalid_requested_service(self):
+        self.client.force_login(self.admin)
+        response = self.client.post(
+            self.create_url, data=json.dumps(self._payload(requestedService="not_a_real_service")), content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(MobileCareRequest.objects.filter(patient=self.patient).exists())
+
+    def test_create_does_not_duplicate_patient_demographics(self):
+        """The request row carries only a `patient` FK plus the *visit*
+        address — never a copy of the patient's name/DOB/chart address."""
+        self.client.force_login(self.admin)
+        response = self.client.post(self.create_url, data=json.dumps(self._payload()), content_type="application/json")
+        row = MobileCareRequest.objects.get(pk=response.json()["request"]["id"])
+        field_names = {f.name for f in MobileCareRequest._meta.get_fields()}
+        self.assertNotIn("first_name", field_names)
+        self.assertNotIn("date_of_birth", field_names)
+        self.assertEqual(row.address_line_1, "1 Visit St")
+        self.assertNotEqual(row.address_line_1, self.patient.address)
+
+    # --- List / detail ----------------------------------------------------------
+
+    def test_staff_list_defaults_to_open_statuses(self):
+        self.client.force_login(self.admin)
+        create_response = self.client.post(self.create_url, data=json.dumps(self._payload()), content_type="application/json")
+        request_id = create_response.json()["request"]["id"]
+        self.client.post(self._cancel_url(request_id))
+
+        response = self.client.get(self.list_url)
+        self.assertNotIn(request_id, [row["id"] for row in response.json()["requests"]])
+
+        all_response = self.client.get(self.list_url + "?status=cancelled")
+        self.assertIn(request_id, [row["id"] for row in all_response.json()["requests"]])
+
+    def test_staff_detail_view(self):
+        self.client.force_login(self.admin)
+        create_response = self.client.post(self.create_url, data=json.dumps(self._payload()), content_type="application/json")
+        request_id = create_response.json()["request"]["id"]
+        response = self.client.get(self._detail_url(request_id))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["request"]["id"], request_id)
+
+    # --- Edit before assignment -------------------------------------------------
+
+    def test_staff_can_edit_request_before_assignment(self):
+        self.client.force_login(self.admin)
+        create_response = self.client.post(self.create_url, data=json.dumps(self._payload()), content_type="application/json")
+        request_id = create_response.json()["request"]["id"]
+
+        response = self.client.patch(
+            self._detail_url(request_id),
+            data=json.dumps({"city": "Raleigh", "primaryCondition": "Updated condition", "mobilityNotes": "Now uses a cane"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()["request"]
+        self.assertEqual(body["city"], "Raleigh")
+        self.assertEqual(body["primaryCondition"], "Updated condition")
+        self.assertEqual(body["mobilityNotes"], "Now uses a cane")
+        row = MobileCareRequest.objects.get(pk=request_id)
+        self.assertEqual(row.updated_by_id, self.admin.id)
+
+    def test_cannot_edit_request_after_match(self):
+        self.client.force_login(self.admin)
+        create_response = self.client.post(self.create_url, data=json.dumps(self._payload()), content_type="application/json")
+        request_id = create_response.json()["request"]["id"]
+        self.client.post(
+            reverse("api-mobile-care-request-match", kwargs={"request_id": request_id}),
+            data=json.dumps({"providerId": str(self.provider.pk)}),
+            content_type="application/json",
+        )
+        response = self.client.patch(
+            self._detail_url(request_id), data=json.dumps({"city": "Should not save"}), content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 422)
+        row = MobileCareRequest.objects.get(pk=request_id)
+        self.assertEqual(row.city, "Cary")
+
+        detail_response = self.client.get(self._detail_url(request_id))
+        self.assertFalse(detail_response.json()["request"]["canEdit"])
+
+    # --- Cancel -------------------------------------------------------------
+
+    def test_staff_can_cancel_request(self):
+        self.client.force_login(self.admin)
+        create_response = self.client.post(self.create_url, data=json.dumps(self._payload()), content_type="application/json")
+        request_id = create_response.json()["request"]["id"]
+        response = self.client.post(self._cancel_url(request_id), data=json.dumps({"reason": "Patient changed their mind"}), content_type="application/json")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["request"]["status"], "cancelled")
+
+    def test_cancel_also_cancels_linked_appointment(self):
+        self.client.force_login(self.admin)
+        create_response = self.client.post(self.create_url, data=json.dumps(self._payload()), content_type="application/json")
+        request_id = create_response.json()["request"]["id"]
+        self.client.post(
+            reverse("api-mobile-care-request-match", kwargs={"request_id": request_id}),
+            data=json.dumps({"providerId": str(self.provider.pk)}),
+            content_type="application/json",
+        )
+        starts_at = timezone.now() + timedelta(days=1)
+        schedule_response = self.client.post(
+            reverse("api-mobile-care-request-schedule", kwargs={"request_id": request_id}),
+            data=json.dumps({"startsAt": starts_at.isoformat(), "endsAt": (starts_at + timedelta(minutes=30)).isoformat(), "kind": "follow_up"}),
+            content_type="application/json",
+        )
+        appointment_id = schedule_response.json()["appointment"]["id"]
+
+        self.client.post(self._cancel_url(request_id))
+        appointment = Appointment.objects.get(pk=appointment_id)
+        self.assertEqual(appointment.status, "cancelled")
+
+    def test_cannot_cancel_already_cancelled_request(self):
+        self.client.force_login(self.admin)
+        create_response = self.client.post(self.create_url, data=json.dumps(self._payload()), content_type="application/json")
+        request_id = create_response.json()["request"]["id"]
+        self.client.post(self._cancel_url(request_id))
+        response = self.client.post(self._cancel_url(request_id))
+        self.assertEqual(response.status_code, 409)
+
+    # --- Status history -----------------------------------------------------
+
+    def test_status_history_reflects_lifecycle(self):
+        self.client.force_login(self.admin)
+        create_response = self.client.post(self.create_url, data=json.dumps(self._payload()), content_type="application/json")
+        request_id = create_response.json()["request"]["id"]
+        self.client.post(
+            reverse("api-mobile-care-request-match", kwargs={"request_id": request_id}),
+            data=json.dumps({"providerId": str(self.provider.pk)}),
+            content_type="application/json",
+        )
+        self.client.post(self._cancel_url(request_id))
+
+        response = self.client.get(self._history_url(request_id))
+        self.assertEqual(response.status_code, 200)
+        actions = [entry["action"] for entry in response.json()["history"]]
+        self.assertIn("mobile_care_request.created", actions)
+        self.assertIn("mobile_care_request.matched", actions)
+        self.assertIn("mobile_care_request.cancelled", actions)
+        # Chronological order.
+        self.assertEqual(actions.index("mobile_care_request.created"), 0)
+
+    # --- Tenant isolation / organization validation ------------------------
+
+    def test_cross_tenant_detail_denied(self):
+        other_admin = User.objects.create_user(
+            username="sr-other-admin", password="safe-test-password", organization=self.other_org, role=User.Role.ADMIN,
+        )
+        self.client.force_login(self.admin)
+        create_response = self.client.post(self.create_url, data=json.dumps(self._payload()), content_type="application/json")
+        request_id = create_response.json()["request"]["id"]
+
+        self.client.force_login(other_admin)
+        response = self.client.get(self._detail_url(request_id))
+        self.assertEqual(response.status_code, 404)
+
+    def test_create_rejects_patient_from_another_organization(self):
+        self.client.force_login(self.admin)
+        url = reverse("api-mobile-care-request-create", kwargs={"patient_id": str(self.other_org_patient.pk)})
+        response = self.client.post(url, data=json.dumps(self._payload()), content_type="application/json")
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(MobileCareRequest.objects.filter(patient=self.other_org_patient).exists())
+
+    def test_non_scheduling_role_cannot_create(self):
+        billing_only = User.objects.create_user(
+            username="sr-biller", password="safe-test-password", organization=self.org, role=User.Role.BILLER,
+        )
+        self.client.force_login(billing_only)
+        response = self.client.post(self.create_url, data=json.dumps(self._payload()), content_type="application/json")
+        self.assertEqual(response.status_code, 403)
+
+    # --- Patient portal -----------------------------------------------------
+
+    def test_patient_can_create_request_via_portal(self):
+        self.client.force_login(self.portal_user)
+        response = self.client.post(self.portal_list_url, data=json.dumps(self._payload()), content_type="application/json")
+        self.assertEqual(response.status_code, 201)
+        body = response.json()["request"]
+        self.assertEqual(body["requestedService"], "evaluation")
+        row = MobileCareRequest.objects.get(pk=body["id"])
+        self.assertEqual(row.source, "patient_portal")
+        self.assertEqual(row.created_by_id, self.portal_user.id)
+
+    def test_patient_can_edit_own_request_before_assignment(self):
+        self.client.force_login(self.portal_user)
+        create_response = self.client.post(self.portal_list_url, data=json.dumps(self._payload()), content_type="application/json")
+        request_id = create_response.json()["request"]["id"]
+        response = self.client.patch(
+            self._portal_detail_url(request_id), data=json.dumps({"mobilityNotes": "Updated by patient"}), content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["request"]["mobilityNotes"], "Updated by patient")
+
+    def test_patient_cannot_edit_another_patients_request(self):
+        other_portal_user = User.objects.create_user(
+            username="sr-other-portal-patient", password="safe-test-password", organization=self.org, role=User.Role.PATIENT,
+        )
+        other_patient = Patient.objects.create(
+            organization=self.org, first_name="Not", last_name="Yours", date_of_birth=date(1992, 2, 2), portal_user=other_portal_user,
+        )
+        self.client.force_login(self.admin)
+        create_url = reverse("api-mobile-care-request-create", kwargs={"patient_id": str(other_patient.pk)})
+        create_response = self.client.post(create_url, data=json.dumps(self._payload()), content_type="application/json")
+        request_id = create_response.json()["request"]["id"]
+
+        self.client.force_login(self.portal_user)
+        response = self.client.get(self._portal_detail_url(request_id))
+        self.assertEqual(response.status_code, 404)
+
+
+class ProviderEligibilityTests(TestCase):
+    """check_provider_eligibility() — the structured, reason-coded backend
+    service that determines whether a PT/PTA could take a given Patient
+    Service Request. Each test isolates exactly one documented check by
+    starting from a fully-eligible baseline provider/request and breaking
+    one thing at a time; a few tests then confirm multiple reasons can be
+    collected together, that the check never writes to the database, and
+    that expired-lockout healing (User.effective_status) is respected."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Eligibility PT", slug="eligibility-pt")
+        self.other_org = Organization.objects.create(name="Other Eligibility PT", slug="eligibility-other-pt")
+
+        self.visit_weekday = 0  # Monday
+        today = date.today()
+        days_ahead = (self.visit_weekday - today.weekday()) % 7 or 7
+        self.visit_date = today + timedelta(days=days_ahead)
+
+        self.patient = Patient.objects.create(
+            organization=self.org, first_name="Val", last_name="Eligible", date_of_birth=date(1980, 6, 1),
+        )
+
+        self.provider_user = User.objects.create_user(
+            username="elig-provider", password="safe-test-password", organization=self.org, role=User.Role.THERAPIST,
+        )
+        self.provider = Provider.objects.create(
+            organization=self.org, user=self.provider_user, first_name="Pat", last_name="Therapist", specialty="Orthopedics",
+        )
+        UserLicense.objects.create(
+            user=self.provider_user, license_number="PT-100", issuing_state="NC",
+            expires_at=date.today() + timedelta(days=365),
+            verification_status=UserLicense.VerificationStatus.VERIFIED,
+        )
+        service_area = ServiceArea.objects.create(organization=self.org, provider=self.provider, name="Primary", is_active=True)
+        ServiceAreaZipCode.objects.create(service_area=service_area, zip_code="27526")
+        HomeVisitAvailability.objects.create(
+            organization=self.org, provider=self.provider, availability_type=HomeVisitAvailability.AvailabilityType.AVAILABLE,
+            is_recurring=True, day_of_week=self.visit_weekday, start_time=time(8, 0), end_time=time(17, 0), is_active=True,
+        )
+
+        self.request = MobileCareRequest.objects.create(
+            organization=self.org, patient=self.patient,
+            address_line_1="1 Test St", city="Cary", state="NC", zip_code="27526",
+            earliest_date=self.visit_date, requested_service=MobileCareRequest.RequestedService.FOLLOW_UP,
+        )
+
+    def test_fully_eligible_provider(self):
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertTrue(result.eligible)
+        self.assertEqual(result.reasons, ())
+
+    def test_wrong_organization(self):
+        other_provider = Provider.objects.create(organization=self.other_org, first_name="Out", last_name="Of Org")
+        result = check_provider_eligibility(other_provider, self.request)
+        self.assertFalse(result.eligible)
+        self.assertIn(EligibilityReason.WRONG_ORGANIZATION, result.reasons)
+
+    def test_provider_inactive(self):
+        self.provider.is_active = False
+        self.provider.save(update_fields=["is_active"])
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertFalse(result.eligible)
+        self.assertIn(EligibilityReason.PROVIDER_INACTIVE, result.reasons)
+
+    def test_no_user_account(self):
+        self.provider.user = None
+        self.provider.save(update_fields=["user"])
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertFalse(result.eligible)
+        self.assertIn(EligibilityReason.NO_USER_ACCOUNT, result.reasons)
+
+    def test_account_inactive(self):
+        self.provider_user.status = User.Status.INACTIVE
+        self.provider_user.is_active = False
+        self.provider_user.save(update_fields=["status", "is_active"])
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertIn(EligibilityReason.ACCOUNT_INACTIVE, result.reasons)
+
+    def test_account_locked_out(self):
+        self.provider_user.status = User.Status.LOCKED_OUT
+        self.provider_user.is_active = False
+        self.provider_user.locked_until = timezone.now() + timedelta(hours=1)
+        self.provider_user.save(update_fields=["status", "is_active", "locked_until"])
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertIn(EligibilityReason.ACCOUNT_LOCKED, result.reasons)
+
+    def test_account_suspended(self):
+        self.provider_user.status = User.Status.SUSPENDED
+        self.provider_user.is_active = False
+        self.provider_user.save(update_fields=["status", "is_active"])
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertIn(EligibilityReason.ACCOUNT_SUSPENDED, result.reasons)
+
+    def test_account_deleted(self):
+        self.provider_user.status = User.Status.DELETED
+        self.provider_user.is_active = False
+        self.provider_user.save(update_fields=["status", "is_active"])
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertIn(EligibilityReason.ACCOUNT_DELETED, result.reasons)
+
+    def test_expired_lockout_heals_to_active(self):
+        self.provider_user.status = User.Status.LOCKED_OUT
+        self.provider_user.is_active = False
+        self.provider_user.locked_until = timezone.now() - timedelta(hours=1)
+        self.provider_user.save(update_fields=["status", "is_active", "locked_until"])
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertNotIn(EligibilityReason.ACCOUNT_LOCKED, result.reasons)
+
+    def test_license_expired(self):
+        self.provider_user.licenses.all().delete()
+        UserLicense.objects.create(
+            user=self.provider_user, license_number="PT-100", issuing_state="NC",
+            expires_at=date.today() - timedelta(days=1),
+            verification_status=UserLicense.VerificationStatus.VERIFIED,
+        )
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertIn(EligibilityReason.LICENSE_EXPIRED, result.reasons)
+
+    def test_no_license_on_file(self):
+        self.provider_user.licenses.all().delete()
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertIn(EligibilityReason.LICENSE_EXPIRED, result.reasons)
+
+    def test_license_pending_verification_not_counted(self):
+        self.provider_user.licenses.all().delete()
+        UserLicense.objects.create(
+            user=self.provider_user, license_number="PT-100", issuing_state="NC",
+            expires_at=date.today() + timedelta(days=365),
+            verification_status=UserLicense.VerificationStatus.PENDING_VERIFICATION,
+        )
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertIn(EligibilityReason.LICENSE_EXPIRED, result.reasons)
+
+    def test_wrong_state_license(self):
+        self.provider_user.licenses.all().delete()
+        UserLicense.objects.create(
+            user=self.provider_user, license_number="PT-200", issuing_state="SC",
+            expires_at=date.today() + timedelta(days=365),
+            verification_status=UserLicense.VerificationStatus.VERIFIED,
+        )
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertIn(EligibilityReason.WRONG_STATE_LICENSE, result.reasons)
+        self.assertNotIn(EligibilityReason.LICENSE_EXPIRED, result.reasons)
+
+    def test_provider_type_not_permitted_for_evaluation(self):
+        self.provider_user.role = User.Role.ASSISTANT
+        self.provider_user.save(update_fields=["role"])
+        self.request.requested_service = MobileCareRequest.RequestedService.EVALUATION
+        self.request.save(update_fields=["requested_service"])
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertIn(EligibilityReason.PROVIDER_TYPE_NOT_PERMITTED, result.reasons)
+
+    def test_provider_type_not_permitted_for_discharge(self):
+        self.provider_user.role = User.Role.ASSISTANT
+        self.provider_user.save(update_fields=["role"])
+        self.request.requested_service = MobileCareRequest.RequestedService.DISCHARGE
+        self.request.save(update_fields=["requested_service"])
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertIn(EligibilityReason.PROVIDER_TYPE_NOT_PERMITTED, result.reasons)
+
+    def test_pta_permitted_for_follow_up(self):
+        self.provider_user.role = User.Role.ASSISTANT
+        self.provider_user.save(update_fields=["role"])
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertNotIn(EligibilityReason.PROVIDER_TYPE_NOT_PERMITTED, result.reasons)
+
+    def test_outside_service_area(self):
+        self.request.zip_code = "99999"
+        self.request.save(update_fields=["zip_code"])
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertIn(EligibilityReason.OUTSIDE_SERVICE_AREA, result.reasons)
+
+    def test_inactive_service_area_does_not_count(self):
+        ServiceArea.objects.filter(provider=self.provider).update(is_active=False)
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertIn(EligibilityReason.OUTSIDE_SERVICE_AREA, result.reasons)
+
+    def test_not_available_no_availability_rows(self):
+        HomeVisitAvailability.objects.filter(provider=self.provider).delete()
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertIn(EligibilityReason.NOT_AVAILABLE, result.reasons)
+
+    def test_not_available_wrong_weekday(self):
+        HomeVisitAvailability.objects.filter(provider=self.provider).update(day_of_week=(self.visit_weekday + 1) % 7)
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertIn(EligibilityReason.NOT_AVAILABLE, result.reasons)
+
+    def test_not_available_blocked_overrides_available_for_unspecified_window(self):
+        HomeVisitAvailability.objects.create(
+            organization=self.org, provider=self.provider, availability_type=HomeVisitAvailability.AvailabilityType.BLOCKED,
+            is_recurring=True, day_of_week=self.visit_weekday, start_time=time(8, 0), end_time=time(9, 0), is_active=True,
+        )
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertIn(EligibilityReason.NOT_AVAILABLE, result.reasons)
+
+    def test_partial_block_outside_preferred_window_does_not_disqualify(self):
+        HomeVisitAvailability.objects.create(
+            organization=self.org, provider=self.provider, availability_type=HomeVisitAvailability.AvailabilityType.BLOCKED,
+            is_recurring=True, day_of_week=self.visit_weekday, start_time=time(8, 0), end_time=time(9, 0), is_active=True,
+        )
+        self.request.preferred_time_window = MobileCareRequest.TimeWindow.AFTERNOON
+        self.request.save(update_fields=["preferred_time_window"])
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertNotIn(EligibilityReason.NOT_AVAILABLE, result.reasons)
+
+    def test_available_respects_preferred_time_window(self):
+        HomeVisitAvailability.objects.filter(provider=self.provider).update(start_time=time(17, 30), end_time=time(20, 0))
+        self.request.preferred_time_window = MobileCareRequest.TimeWindow.MORNING
+        self.request.save(update_fields=["preferred_time_window"])
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertIn(EligibilityReason.NOT_AVAILABLE, result.reasons)
+
+    def test_available_one_time_window_on_specific_date(self):
+        HomeVisitAvailability.objects.filter(provider=self.provider).delete()
+        HomeVisitAvailability.objects.create(
+            organization=self.org, provider=self.provider, availability_type=HomeVisitAvailability.AvailabilityType.AVAILABLE,
+            is_recurring=False, specific_date=self.visit_date, start_time=time(8, 0), end_time=time(17, 0), is_active=True,
+        )
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertNotIn(EligibilityReason.NOT_AVAILABLE, result.reasons)
+
+    def test_available_within_flexible_date_range(self):
+        HomeVisitAvailability.objects.filter(provider=self.provider).update(day_of_week=(self.visit_weekday + 2) % 7)
+        self.request.latest_date = self.visit_date + timedelta(days=6)
+        self.request.save(update_fields=["latest_date"])
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertNotIn(EligibilityReason.NOT_AVAILABLE, result.reasons)
+
+    def test_already_booked(self):
+        Appointment.objects.create(
+            patient=self.patient, therapist=self.provider_user, provider=self.provider,
+            kind=Appointment.Kind.FOLLOW_UP, status=Appointment.Status.SCHEDULED,
+            starts_at=timezone.make_aware(datetime.combine(self.visit_date, time(9, 0))),
+            ends_at=timezone.make_aware(datetime.combine(self.visit_date, time(9, 45))),
+            created_by=self.provider_user,
+        )
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertIn(EligibilityReason.ALREADY_BOOKED, result.reasons)
+
+    def test_cancelled_appointment_does_not_count_as_booked(self):
+        Appointment.objects.create(
+            patient=self.patient, therapist=self.provider_user, provider=self.provider,
+            kind=Appointment.Kind.FOLLOW_UP, status=Appointment.Status.CANCELLED,
+            starts_at=timezone.make_aware(datetime.combine(self.visit_date, time(9, 0))),
+            ends_at=timezone.make_aware(datetime.combine(self.visit_date, time(9, 45))),
+            created_by=self.provider_user,
+        )
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertNotIn(EligibilityReason.ALREADY_BOOKED, result.reasons)
+
+    def test_booked_outside_preferred_window_does_not_conflict(self):
+        self.request.preferred_time_window = MobileCareRequest.TimeWindow.MORNING
+        self.request.save(update_fields=["preferred_time_window"])
+        Appointment.objects.create(
+            patient=self.patient, therapist=self.provider_user, provider=self.provider,
+            kind=Appointment.Kind.FOLLOW_UP, status=Appointment.Status.SCHEDULED,
+            starts_at=timezone.make_aware(datetime.combine(self.visit_date, time(18, 0))),
+            ends_at=timezone.make_aware(datetime.combine(self.visit_date, time(18, 45))),
+            created_by=self.provider_user,
+        )
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertNotIn(EligibilityReason.ALREADY_BOOKED, result.reasons)
+
+    def test_specialty_mismatch(self):
+        self.request.specialty_requested = "Pediatrics"
+        self.request.save(update_fields=["specialty_requested"])
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertIn(EligibilityReason.SPECIALTY_MISMATCH, result.reasons)
+
+    def test_specialty_match_case_insensitive(self):
+        self.request.specialty_requested = "orthopedics"
+        self.request.save(update_fields=["specialty_requested"])
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertNotIn(EligibilityReason.SPECIALTY_MISMATCH, result.reasons)
+
+    def test_no_specialty_requested_is_not_a_mismatch(self):
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertNotIn(EligibilityReason.SPECIALTY_MISMATCH, result.reasons)
+
+    def test_collects_multiple_reasons_at_once(self):
+        self.provider_user.status = User.Status.SUSPENDED
+        self.provider_user.is_active = False
+        self.provider_user.save(update_fields=["status", "is_active"])
+        self.request.zip_code = "99999"
+        self.request.specialty_requested = "Pediatrics"
+        self.request.save(update_fields=["zip_code", "specialty_requested"])
+        result = check_provider_eligibility(self.provider, self.request)
+        self.assertFalse(result.eligible)
+        self.assertIn(EligibilityReason.ACCOUNT_SUSPENDED, result.reasons)
+        self.assertIn(EligibilityReason.OUTSIDE_SERVICE_AREA, result.reasons)
+        self.assertIn(EligibilityReason.SPECIALTY_MISMATCH, result.reasons)
+
+    def test_eligibility_check_is_read_only(self):
+        before = (
+            self.provider_user.status,
+            self.request.status,
+            HomeVisitAvailability.objects.filter(provider=self.provider).count(),
+        )
+        check_provider_eligibility(self.provider, self.request)
+        self.provider_user.refresh_from_db()
+        self.request.refresh_from_db()
+        after = (
+            self.provider_user.status,
+            self.request.status,
+            HomeVisitAvailability.objects.filter(provider=self.provider).count(),
+        )
+        self.assertEqual(before, after)
+
+
+class ProviderMatchingTests(TestCase):
+    """rank_eligible_providers() / generate_matches() / offer_match() — the
+    scored, continuity-first matching pipeline that replaces plain
+    ZIP-nearest matching (see care/mobile_care.py's DEFAULT_MATCH_WEIGHTS).
+    Eligibility gating itself (license/account/service-area/availability)
+    is exhaustively covered by ProviderEligibilityTests; these tests focus
+    on ranking order, that ineligible providers never surface here, the
+    persisted ProviderMatch fields an admin views (score/reasons/status),
+    and tenant isolation end-to-end through the API."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Matching PT", slug="matching-pt")
+        self.other_org = Organization.objects.create(name="Other Matching PT", slug="matching-other-pt")
+
+        self.visit_weekday = 0  # Monday
+        today = date.today()
+        days_ahead = (self.visit_weekday - today.weekday()) % 7 or 7
+        self.visit_date = today + timedelta(days=days_ahead)
+
+        self.admin = User.objects.create_user(
+            username="match-admin", password="safe-test-password", organization=self.org, role=User.Role.ADMIN,
+        )
+        self.patient = Patient.objects.create(
+            organization=self.org, first_name="Cara", last_name="Match", date_of_birth=date(1979, 3, 3),
+        )
+
+    def _make_provider(
+        self, *, org, username, first_name, last_name,
+        specialty="", zip_code="27526", primary_zip="27526", license_state="NC",
+        available=True,
+    ):
+        user = User.objects.create_user(
+            username=username, password="safe-test-password", organization=org, role=User.Role.THERAPIST,
+        )
+        provider = Provider.objects.create(
+            organization=org, user=user, first_name=first_name, last_name=last_name, specialty=specialty,
+        )
+        UserLicense.objects.create(
+            user=user, license_number=f"PT-{username}", issuing_state=license_state,
+            expires_at=date.today() + timedelta(days=365),
+            verification_status=UserLicense.VerificationStatus.VERIFIED,
+        )
+        service_area = ServiceArea.objects.create(
+            organization=org, provider=provider, name="Primary", is_active=True, primary_zip_code=primary_zip,
+        )
+        ServiceAreaZipCode.objects.create(service_area=service_area, zip_code=zip_code)
+        if available:
+            HomeVisitAvailability.objects.create(
+                organization=org, provider=provider, availability_type=HomeVisitAvailability.AvailabilityType.AVAILABLE,
+                is_recurring=True, day_of_week=self.visit_weekday, start_time=time(8, 0), end_time=time(17, 0), is_active=True,
+            )
+        return provider
+
+    def _make_request(self, **overrides):
+        defaults = dict(
+            organization=self.org, patient=self.patient,
+            address_line_1="1 Test St", city="Cary", state="NC", zip_code="27526",
+            earliest_date=self.visit_date, requested_service=MobileCareRequest.RequestedService.FOLLOW_UP,
+        )
+        defaults.update(overrides)
+        return MobileCareRequest.objects.create(**defaults)
+
+    def test_continuity_preferred(self):
+        continuity_provider = self._make_provider(org=self.org, username="match-continuity", first_name="Cont", last_name="Inuity")
+        self._make_provider(org=self.org, username="match-other", first_name="Other", last_name="Provider")
+        request = self._make_request(preferred_provider=continuity_provider)
+
+        ranked = rank_eligible_providers(request)
+
+        self.assertGreaterEqual(len(ranked), 2)
+        self.assertEqual(ranked[0].provider.pk, continuity_provider.pk)
+        self.assertEqual(ranked[0].continuity_score, 1.0)
+        self.assertIn("Existing care relationship with this patient", ranked[0].reasons)
+
+    def test_expired_license_excluded(self):
+        provider = self._make_provider(org=self.org, username="match-expired", first_name="Ex", last_name="Pired")
+        provider.user.licenses.all().delete()
+        UserLicense.objects.create(
+            user=provider.user, license_number="PT-EXP", issuing_state="NC",
+            expires_at=date.today() - timedelta(days=1),
+            verification_status=UserLicense.VerificationStatus.VERIFIED,
+        )
+        request = self._make_request()
+
+        ranked = rank_eligible_providers(request)
+
+        self.assertNotIn(provider.pk, [entry.provider.pk for entry in ranked])
+
+    def test_wrong_state_excluded(self):
+        provider = self._make_provider(org=self.org, username="match-wrong-state", first_name="Wrong", last_name="State", license_state="SC")
+        request = self._make_request()
+
+        ranked = rank_eligible_providers(request)
+
+        self.assertNotIn(provider.pk, [entry.provider.pk for entry in ranked])
+
+    def test_unavailable_provider_excluded(self):
+        provider = self._make_provider(org=self.org, username="match-unavailable", first_name="Un", last_name="Available", available=False)
+        request = self._make_request()
+
+        ranked = rank_eligible_providers(request)
+
+        self.assertNotIn(provider.pk, [entry.provider.pk for entry in ranked])
+
+    def test_outside_service_radius_excluded(self):
+        # No geocoding provider is connected in this codebase (ServiceArea's
+        # own docstring) — "outside the service radius" resolves to "outside
+        # the provider's declared coverage ZIPs," the actual signal used.
+        provider = self._make_provider(
+            org=self.org, username="match-far-away", first_name="Far", last_name="Away",
+            zip_code="99999", primary_zip="99999",
+        )
+        request = self._make_request()  # zip_code="27526" — outside this provider's coverage
+
+        ranked = rank_eligible_providers(request)
+
+        self.assertNotIn(provider.pk, [entry.provider.pk for entry in ranked])
+
+    def test_specialty_match_prioritized(self):
+        exact_match = self._make_provider(
+            org=self.org, username="match-exact-specialty", first_name="Ex", last_name="Act", specialty="Orthopedics",
+        )
+        partial_match = self._make_provider(
+            org=self.org, username="match-partial-specialty", first_name="Par", last_name="Tial",
+            specialty="Orthopedics, Sports Medicine",
+        )
+        request = self._make_request(specialty_requested="Orthopedics")
+
+        ranked = rank_eligible_providers(request)
+        ids = [entry.provider.pk for entry in ranked]
+
+        self.assertIn(exact_match.pk, ids)
+        self.assertIn(partial_match.pk, ids)
+        self.assertLess(ids.index(exact_match.pk), ids.index(partial_match.pk))
+
+    def test_tenant_isolation(self):
+        other_org_provider = self._make_provider(org=self.other_org, username="match-cross-tenant", first_name="Cross", last_name="Tenant")
+        request = self._make_request()
+
+        ranked = rank_eligible_providers(request)
+
+        self.assertNotIn(other_org_provider.pk, [entry.provider.pk for entry in ranked])
+
+    def test_generate_matches_persists_pending_with_score_and_reasons(self):
+        continuity_provider = self._make_provider(org=self.org, username="match-gm-continuity", first_name="Cont", last_name="Inuity")
+        request = self._make_request(preferred_provider=continuity_provider)
+
+        created = generate_matches(request, actor=self.admin)
+
+        self.assertEqual(len(created), 1)
+        match = created[0]
+        self.assertEqual(match.status, ProviderMatch.Status.PENDING)
+        self.assertEqual(match.rank, 1)
+        self.assertIsNotNone(match.score)
+        self.assertIn("Existing care relationship with this patient", match.score_breakdown.get("reasons", []))
+
+    def test_offer_match_transitions_pending_to_offered(self):
+        self._make_provider(org=self.org, username="match-offer", first_name="Off", last_name="Er")
+        request = self._make_request()
+        match = generate_matches(request, actor=self.admin)[0]
+
+        offered = offer_match(match, actor=self.admin)
+
+        self.assertEqual(offered.status, ProviderMatch.Status.OFFERED)
+        self.assertIsNotNone(offered.offered_at)
+
+    def test_cannot_offer_already_offered_match(self):
+        self._make_provider(org=self.org, username="match-double-offer", first_name="Dou", last_name="Ble")
+        request = self._make_request()
+        match = generate_matches(request, actor=self.admin)[0]
+        offer_match(match, actor=self.admin)
+        match.refresh_from_db()
+
+        with self.assertRaises(ValidationError):
+            offer_match(match, actor=self.admin)
+
+    def test_respond_to_match_rejects_pending_not_yet_offered(self):
+        provider = self._make_provider(org=self.org, username="match-respond-pending", first_name="Res", last_name="Pond")
+        request = self._make_request()
+        match = generate_matches(request, actor=self.admin)[0]
+
+        with self.assertRaises(ValidationError):
+            respond_to_match(match, accept=True, actor=provider.user)
+
+    def test_admin_can_view_ranked_matches_via_api(self):
+        self._make_provider(org=self.org, username="match-api-view", first_name="Api", last_name="View")
+        request = self._make_request()
+        self.client.force_login(self.admin)
+
+        response = self.client.post(reverse("api-mobile-care-request-generate-matches", kwargs={"request_id": str(request.pk)}))
+
+        self.assertEqual(response.status_code, 201)
+        body = response.json()["matches"]
+        self.assertEqual(len(body), 1)
+        self.assertEqual(body[0]["status"], "pending")
+        self.assertIsInstance(body[0]["score"], float)
+        self.assertIsInstance(body[0]["scoreBreakdown"], dict)
+        self.assertIsInstance(body[0]["reasons"], list)
+
+    def test_offer_match_via_api_and_tenant_isolation(self):
+        self._make_provider(org=self.org, username="match-api-offer", first_name="Api", last_name="Offer")
+        other_admin = User.objects.create_user(
+            username="match-other-admin", password="safe-test-password", organization=self.other_org, role=User.Role.ADMIN,
+        )
+        request = self._make_request()
+        self.client.force_login(self.admin)
+        self.client.post(reverse("api-mobile-care-request-generate-matches", kwargs={"request_id": str(request.pk)}))
+        match = request.matches.first()
+
+        self.client.force_login(other_admin)
+        cross_tenant_response = self.client.post(reverse("api-mobile-care-match-offer", kwargs={"match_id": str(match.pk)}))
+        self.assertEqual(cross_tenant_response.status_code, 404)
+
+        self.client.force_login(self.admin)
+        response = self.client.post(reverse("api-mobile-care-match-offer", kwargs={"match_id": str(match.pk)}))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["match"]["status"], "offered")
+
+
+class ProviderOfferWorkflowTests(TestCase):
+    """offer_match() / mark_offer_viewed() / respond_to_match() /
+    expire_stale_offers() — the provider-facing offer lifecycle: an offer
+    is created (OFFER_CREATED), the provider views it via the limited
+    "Visit Offers" list (OFFER_VIEWED, no patient name/address), accepts
+    (OFFER_ACCEPTED, creates a HomeVisitAssignment, updates the request
+    status) or declines (OFFER_DECLINED, cascades to the next ranked
+    candidate) — and an unanswered offer past its expiry is caught the
+    same way (OFFER_EXPIRED, also cascading), both via the sweep and
+    lazily the moment anyone acts on it."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Offer Workflow PT", slug="offer-workflow-pt")
+        self.other_org = Organization.objects.create(name="Other Offer Workflow PT", slug="offer-workflow-other-pt")
+        self.admin = User.objects.create_user(
+            username="offer-admin", password="safe-test-password", organization=self.org, role=User.Role.ADMIN,
+        )
+        self.patient = Patient.objects.create(
+            organization=self.org, first_name="Priya", last_name="Chartwell", date_of_birth=date(1982, 5, 5),
+        )
+        self.visit_weekday = 0  # Monday
+        today = date.today()
+        days_ahead = (self.visit_weekday - today.weekday()) % 7 or 7
+        self.visit_date = today + timedelta(days=days_ahead)
+
+    def _make_provider(self, *, org=None, username, first_name="Pro", last_name="Vider", specialty=""):
+        org = org or self.org
+        user = User.objects.create_user(
+            username=username, password="safe-test-password", organization=org, role=User.Role.THERAPIST,
+        )
+        provider = Provider.objects.create(
+            organization=org, user=user, first_name=first_name, last_name=last_name, specialty=specialty,
+        )
+        UserLicense.objects.create(
+            user=user, license_number=f"PT-{username}", issuing_state="NC",
+            expires_at=date.today() + timedelta(days=365),
+            verification_status=UserLicense.VerificationStatus.VERIFIED,
+        )
+        service_area = ServiceArea.objects.create(
+            organization=org, provider=provider, name="Primary", is_active=True, primary_zip_code="27526",
+        )
+        ServiceAreaZipCode.objects.create(service_area=service_area, zip_code="27526")
+        HomeVisitAvailability.objects.create(
+            organization=org, provider=provider, availability_type=HomeVisitAvailability.AvailabilityType.AVAILABLE,
+            is_recurring=True, day_of_week=self.visit_weekday, start_time=time(8, 0), end_time=time(17, 0), is_active=True,
+        )
+        return provider
+
+    def _make_request(self, **overrides):
+        defaults = dict(
+            organization=self.org, patient=self.patient,
+            address_line_1="1 Offer St", city="Cary", state="NC", zip_code="27526",
+            earliest_date=self.visit_date, requested_service=MobileCareRequest.RequestedService.FOLLOW_UP,
+        )
+        defaults.update(overrides)
+        return MobileCareRequest.objects.create(**defaults)
+
+    def _events(self, action, object_id):
+        return AuditEvent.objects.filter(action=action, object_id=object_id)
+
+    def test_offer_match_sets_expiry_and_audits_offer_created(self):
+        self._make_provider(username="offer-created")
+        request = self._make_request()
+        match = generate_matches(request, actor=self.admin)[0]
+
+        before = timezone.now()
+        offered = offer_match(match, actor=self.admin)
+
+        self.assertEqual(offered.status, ProviderMatch.Status.OFFERED)
+        self.assertIsNotNone(offered.expires_at)
+        expected_expiry = before + timedelta(hours=DEFAULT_OFFER_EXPIRATION_HOURS)
+        self.assertAlmostEqual(offered.expires_at.timestamp(), expected_expiry.timestamp(), delta=5)
+        self.assertTrue(self._events("OFFER_CREATED", offered.pk).exists())
+
+    def test_offer_expiration_is_configurable(self):
+        self._make_provider(username="offer-custom-expiry")
+        request = self._make_request()
+        match = generate_matches(request, actor=self.admin)[0]
+
+        before = timezone.now()
+        offered = offer_match(match, actor=self.admin, expires_in_hours=1)
+
+        expected_expiry = before + timedelta(hours=1)
+        self.assertAlmostEqual(offered.expires_at.timestamp(), expected_expiry.timestamp(), delta=5)
+
+    def test_my_offers_marks_viewed_once(self):
+        provider = self._make_provider(username="offer-viewed")
+        request = self._make_request()
+        match = generate_matches(request, actor=self.admin)[0]
+        offer_match(match, actor=self.admin)
+
+        self.client.force_login(provider.user)
+        first = self.client.get(reverse("api-mobile-care-my-offers"))
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(self._events("OFFER_VIEWED", match.pk).count(), 1)
+
+        second = self.client.get(reverse("api-mobile-care-my-offers"))
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(self._events("OFFER_VIEWED", match.pk).count(), 1)
+
+    def test_offer_preview_excludes_patient_name_and_address(self):
+        provider = self._make_provider(username="offer-limited-info", specialty="Orthopedics")
+        request = self._make_request(specialty_requested="Orthopedics")
+        match = generate_matches(request, actor=self.admin)[0]
+        offer_match(match, actor=self.admin)
+
+        self.client.force_login(provider.user)
+        response = self.client.get(reverse("api-mobile-care-my-offers"))
+        self.assertEqual(response.status_code, 200)
+        offers = response.json()["offers"]
+        self.assertEqual(len(offers), 1)
+        offer = offers[0]
+
+        raw_body = response.content.decode()
+        self.assertNotIn(self.patient.first_name, raw_body)
+        self.assertNotIn(self.patient.last_name, raw_body)
+        self.assertNotIn("1 Offer St", raw_body)
+        self.assertNotIn("addressLine1", raw_body)
+        self.assertNotIn("fullName", raw_body)
+
+        self.assertEqual(offer["generalArea"], "Cary, NC 27526")
+        self.assertEqual(offer["serviceType"], "follow_up")
+        self.assertEqual(offer["specialtyRequested"], "Orthopedics")
+        self.assertEqual(offer["estimatedDurationMinutes"], 45)
+        self.assertEqual(offer["patientStatus"], "Existing patient")
+        self.assertIn("paymentMethodLabel", offer)
+
+    def test_accept_creates_assignment_and_updates_request_status(self):
+        provider = self._make_provider(username="offer-accept")
+        request = self._make_request()
+        match = generate_matches(request, actor=self.admin)[0]
+        offer_match(match, actor=self.admin)
+
+        self.client.force_login(provider.user)
+        response = self.client.post(
+            reverse("api-mobile-care-match-respond", kwargs={"match_id": str(match.pk)}),
+            data=json.dumps({"accept": True}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["match"]["status"], "accepted")
+        self.assertIsNotNone(body["assignment"])
+
+        request.refresh_from_db()
+        self.assertEqual(request.status, MobileCareRequest.Status.ACCEPTED)
+        self.assertEqual(request.matched_provider_id, provider.pk)
+        self.assertTrue(HomeVisitAssignment.objects.filter(provider_match=match).exists())
+        self.assertTrue(self._events("OFFER_ACCEPTED", match.pk).exists())
+
+    def test_decline_cascades_to_next_candidate(self):
+        first_choice = self._make_provider(username="offer-decline-first")
+        second_choice = self._make_provider(username="offer-decline-second")
+        request = self._make_request()
+        matches = generate_matches(request, actor=self.admin)
+        self.assertEqual(len(matches), 2)
+        first_match = request.matches.get(provider=first_choice)
+        second_match = request.matches.get(provider=second_choice)
+        offer_match(first_match, actor=self.admin)
+
+        self.client.force_login(first_choice.user)
+        response = self.client.post(
+            reverse("api-mobile-care-match-respond", kwargs={"match_id": str(first_match.pk)}),
+            data=json.dumps({"accept": False, "declineReason": "Not available"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+
+        first_match.refresh_from_db()
+        second_match.refresh_from_db()
+        self.assertEqual(first_match.status, ProviderMatch.Status.DECLINED)
+        self.assertEqual(second_match.status, ProviderMatch.Status.OFFERED)
+        self.assertIsNotNone(second_match.offered_at)
+        self.assertTrue(self._events("OFFER_DECLINED", first_match.pk).exists())
+        self.assertTrue(self._events("OFFER_CREATED", second_match.pk).exists())
+
+    def test_expire_stale_offers_transitions_and_cascades(self):
+        first_choice = self._make_provider(username="offer-expire-first")
+        second_choice = self._make_provider(username="offer-expire-second")
+        request = self._make_request()
+        matches = generate_matches(request, actor=self.admin)
+        self.assertEqual(len(matches), 2)
+        first_match = request.matches.get(provider=first_choice)
+        second_match = request.matches.get(provider=second_choice)
+        offer_match(first_match, actor=self.admin)
+        ProviderMatch.objects.filter(pk=first_match.pk).update(expires_at=timezone.now() - timedelta(minutes=1))
+
+        expired_count = expire_stale_offers()
+
+        self.assertEqual(expired_count, 1)
+        first_match.refresh_from_db()
+        second_match.refresh_from_db()
+        self.assertEqual(first_match.status, ProviderMatch.Status.EXPIRED)
+        self.assertEqual(second_match.status, ProviderMatch.Status.OFFERED)
+        self.assertTrue(self._events("OFFER_EXPIRED", first_match.pk).exists())
+        self.assertTrue(self._events("OFFER_CREATED", second_match.pk).exists())
+
+    def test_respond_lazily_expires_a_stale_offer(self):
+        provider = self._make_provider(username="offer-lazy-expire")
+        request = self._make_request()
+        match = generate_matches(request, actor=self.admin)[0]
+        offer_match(match, actor=self.admin)
+        ProviderMatch.objects.filter(pk=match.pk).update(expires_at=timezone.now() - timedelta(minutes=1))
+        match.refresh_from_db()
+
+        with self.assertRaises(ValidationError):
+            respond_to_match(match, accept=True, actor=provider.user)
+
+        match.refresh_from_db()
+        self.assertEqual(match.status, ProviderMatch.Status.EXPIRED)
+        self.assertTrue(self._events("OFFER_EXPIRED", match.pk).exists())
+
+    def test_tenant_isolation_on_my_offers_and_respond(self):
+        other_provider = self._make_provider(org=self.other_org, username="offer-cross-tenant")
+        provider = self._make_provider(username="offer-own-tenant")
+        request = self._make_request()
+        match = generate_matches(request, actor=self.admin)[0]
+        offer_match(match, actor=self.admin)
+
+        self.client.force_login(other_provider.user)
+        offers_response = self.client.get(reverse("api-mobile-care-my-offers"))
+        self.assertEqual(offers_response.status_code, 200)
+        self.assertEqual(offers_response.json()["offers"], [])
+
+        respond_response = self.client.post(
+            reverse("api-mobile-care-match-respond", kwargs={"match_id": str(match.pk)}),
+            data=json.dumps({"accept": True}),
+            content_type="application/json",
+        )
+        self.assertEqual(respond_response.status_code, 404)
+
+        self.client.force_login(provider.user)
+        own_offers_response = self.client.get(reverse("api-mobile-care-my-offers"))
+        self.assertEqual(len(own_offers_response.json()["offers"]), 1)
+
+
+class CareEpisodeContinuityTests(TestCase):
+    """EpisodeOfCare's mobile-care fields (condition/expected_end_date/
+    visit_frequency/expected_visit_count) and derived visits_completed_count/
+    next_visit/plan_of_care_end_date properties — plus the core of this
+    task, create_request()'s continuity preference: a patient's ACTIVE Care
+    Episode's primary therapist is preferred for a new request only while
+    still eligible (active, licensed, available, in the service area, not
+    suspended — see check_provider_eligibility()); otherwise the request
+    falls through to normal matching rather than forcing a stale
+    assignment. "Do not automatically reassign ... unless needed" is
+    exercised by test_continuity_does_not_force_reassignment_mid_matching."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Continuity PT", slug="continuity-pt")
+        self.admin = User.objects.create_user(
+            username="continuity-admin", password="safe-test-password", organization=self.org, role=User.Role.ADMIN,
+        )
+        self.patient = Patient.objects.create(
+            organization=self.org, first_name="Cora", last_name="Continuity", date_of_birth=date(1975, 8, 20),
+        )
+        self.visit_weekday = 0  # Monday
+        today = date.today()
+        days_ahead = (self.visit_weekday - today.weekday()) % 7 or 7
+        self.visit_date = today + timedelta(days=days_ahead)
+
+    def _make_provider(self, *, username, license_state="NC", zip_code="27526", active=True, suspended=False):
+        user = User.objects.create_user(
+            username=username, password="safe-test-password", organization=self.org, role=User.Role.THERAPIST,
+        )
+        if suspended:
+            user.status = User.Status.SUSPENDED
+            user.is_active = False
+            user.save(update_fields=["status", "is_active"])
+        provider = Provider.objects.create(
+            organization=self.org, user=user, first_name="Con", last_name="Tinuity", is_active=active,
+        )
+        UserLicense.objects.create(
+            user=user, license_number=f"PT-{username}", issuing_state=license_state,
+            expires_at=date.today() + timedelta(days=365),
+            verification_status=UserLicense.VerificationStatus.VERIFIED,
+        )
+        service_area = ServiceArea.objects.create(
+            organization=self.org, provider=provider, name="Primary", is_active=True, primary_zip_code=zip_code,
+        )
+        ServiceAreaZipCode.objects.create(service_area=service_area, zip_code=zip_code)
+        HomeVisitAvailability.objects.create(
+            organization=self.org, provider=provider, availability_type=HomeVisitAvailability.AvailabilityType.AVAILABLE,
+            is_recurring=True, day_of_week=self.visit_weekday, start_time=time(8, 0), end_time=time(17, 0), is_active=True,
+        )
+        return provider
+
+    def _make_episode(self, *, primary_therapist=None, status=EpisodeOfCare.Status.ACTIVE, **overrides):
+        return EpisodeOfCare.objects.create(
+            organization=self.org, patient=self.patient, primary_therapist=primary_therapist, status=status, **overrides
+        )
+
+    def _request_kwargs(self, **overrides):
+        defaults = dict(
+            source=MobileCareRequest.Source.FRONT_DESK,
+            address_line_1="1 Continuity St", city="Cary", state="NC", zip_code="27526",
+            earliest_date=self.visit_date, created_by=self.admin,
+        )
+        defaults.update(overrides)
+        return defaults
+
+    def test_continuity_provider_preferred_when_eligible(self):
+        provider = self._make_provider(username="continuity-eligible")
+        self._make_episode(primary_therapist=provider.user)
+
+        entry = create_request(self.patient, **self._request_kwargs())
+
+        self.assertEqual(entry.preferred_provider_id, provider.pk)
+        self.assertIsNotNone(entry.episode_of_care_id)
+
+    def test_continuity_not_preferred_when_license_expired(self):
+        provider = self._make_provider(username="continuity-expired-license")
+        provider.user.licenses.all().delete()
+        UserLicense.objects.create(
+            user=provider.user, license_number="PT-EXP", issuing_state="NC",
+            expires_at=date.today() - timedelta(days=1),
+            verification_status=UserLicense.VerificationStatus.VERIFIED,
+        )
+        self._make_episode(primary_therapist=provider.user)
+
+        entry = create_request(self.patient, **self._request_kwargs())
+
+        self.assertIsNone(entry.preferred_provider_id)
+
+    def test_continuity_not_preferred_when_outside_service_area(self):
+        provider = self._make_provider(username="continuity-far", zip_code="99999")
+        self._make_episode(primary_therapist=provider.user)
+
+        entry = create_request(self.patient, **self._request_kwargs())
+
+        self.assertIsNone(entry.preferred_provider_id)
+
+    def test_continuity_not_preferred_when_suspended(self):
+        provider = self._make_provider(username="continuity-suspended", suspended=True)
+        self._make_episode(primary_therapist=provider.user)
+
+        entry = create_request(self.patient, **self._request_kwargs())
+
+        self.assertIsNone(entry.preferred_provider_id)
+
+    def test_continuity_not_preferred_when_provider_account_inactive(self):
+        provider = self._make_provider(username="continuity-inactive", active=False)
+        self._make_episode(primary_therapist=provider.user)
+
+        entry = create_request(self.patient, **self._request_kwargs())
+
+        self.assertIsNone(entry.preferred_provider_id)
+
+    def test_explicit_preferred_provider_overrides_continuity(self):
+        continuity_provider = self._make_provider(username="continuity-default")
+        explicit_provider = self._make_provider(username="continuity-explicit-choice")
+        self._make_episode(primary_therapist=continuity_provider.user)
+
+        entry = create_request(self.patient, preferred_provider=explicit_provider, **self._request_kwargs())
+
+        self.assertEqual(entry.preferred_provider_id, explicit_provider.pk)
+
+    def test_no_continuity_without_an_active_episode(self):
+        provider = self._make_provider(username="continuity-discharged-episode")
+        self._make_episode(primary_therapist=provider.user, status=EpisodeOfCare.Status.DISCHARGED)
+
+        entry = create_request(self.patient, **self._request_kwargs())
+
+        self.assertIsNone(entry.preferred_provider_id)
+
+    def test_continuity_does_not_force_reassignment_mid_matching(self):
+        # "Do not automatically reassign if patient/provider relationship is
+        # active unless needed" — a second request while the continuity
+        # provider is still perfectly eligible keeps defaulting to them,
+        # without staff having to do anything.
+        provider = self._make_provider(username="continuity-repeat")
+        self._make_episode(primary_therapist=provider.user)
+
+        first = create_request(self.patient, **self._request_kwargs())
+        second = create_request(self.patient, **self._request_kwargs(earliest_date=self.visit_date + timedelta(days=7)))
+
+        self.assertEqual(first.preferred_provider_id, provider.pk)
+        self.assertEqual(second.preferred_provider_id, provider.pk)
+
+    def test_visits_completed_count_and_next_visit(self):
+        provider = self._make_provider(username="continuity-progress")
+        episode = self._make_episode(primary_therapist=provider.user)
+        past = timezone.now() - timedelta(days=7)
+        future = timezone.now() + timedelta(days=3)
+        Appointment.objects.create(
+            patient=self.patient, therapist=provider.user, provider=provider, episode_of_care=episode,
+            status=Appointment.Status.COMPLETED, starts_at=past, ends_at=past + timedelta(minutes=45), created_by=self.admin,
+        )
+        Appointment.objects.create(
+            patient=self.patient, therapist=provider.user, provider=provider, episode_of_care=episode,
+            status=Appointment.Status.SCHEDULED, starts_at=future, ends_at=future + timedelta(minutes=45), created_by=self.admin,
+        )
+
+        self.assertEqual(episode.visits_completed_count, 1)
+        self.assertIsNotNone(episode.next_visit)
+        self.assertEqual(episode.next_visit.starts_at, future)
+
+    def test_plan_of_care_end_date_from_most_recent_note(self):
+        provider = self._make_provider(username="continuity-poc")
+        episode = self._make_episode(primary_therapist=provider.user)
+        ClinicalNote.objects.create(
+            patient=self.patient, therapist=provider.user, episode_of_care=episode,
+            service_date=date.today() - timedelta(days=10), plan_of_care_start=date.today() - timedelta(days=10),
+            plan_of_care_end=date.today() + timedelta(days=20),
+        )
+        ClinicalNote.objects.create(
+            patient=self.patient, therapist=provider.user, episode_of_care=episode,
+            service_date=date.today(), plan_of_care_start=date.today(), plan_of_care_end=date.today() + timedelta(days=30),
+        )
+
+        self.assertEqual(episode.plan_of_care_end_date, date.today() + timedelta(days=30))
+
+    def test_episode_serializer_exposes_mobile_care_fields_via_api(self):
+        provider = self._make_provider(username="continuity-api")
+        self._make_episode(primary_therapist=provider.user, condition="Post-op knee replacement", visit_frequency="2x/week", expected_visit_count=12)
+
+        create_request(self.patient, **self._request_kwargs())
+
+        self.client.force_login(self.admin)
+        response = self.client.get(reverse("api-episode-of-care-create", kwargs={"patient_id": str(self.patient.pk)}))
+        self.assertEqual(response.status_code, 200)
+        episodes = response.json()["episodesOfCare"]
+        self.assertEqual(len(episodes), 1)
+        episode_payload = episodes[0]
+        self.assertEqual(episode_payload["condition"], "Post-op knee replacement")
+        self.assertEqual(episode_payload["visitFrequency"], "2x/week")
+        self.assertEqual(episode_payload["expectedVisitCount"], 12)
+        self.assertEqual(episode_payload["visitsCompleted"], 0)
+        self.assertTrue(episode_payload["isMobileCareEpisode"])
+        self.assertEqual(episode_payload["primaryTherapistName"], provider.user.get_full_name() or provider.user.username)
+
+    def test_create_episode_via_api_accepts_mobile_care_fields(self):
+        self.client.force_login(self.admin)
+        response = self.client.post(
+            reverse("api-episode-of-care-create", kwargs={"patient_id": str(self.patient.pk)}),
+            data=json.dumps({
+                "diagnosis": "M17.11",
+                "condition": "Post-op knee replacement",
+                "status": "active",
+                "startDate": self.visit_date.isoformat(),
+                "expectedEndDate": (self.visit_date + timedelta(days=42)).isoformat(),
+                "visitFrequency": "2x/week",
+                "expectedVisitCount": 12,
+            }),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 201)
+        body = response.json()["episodeOfCare"]
+        self.assertEqual(body["condition"], "Post-op knee replacement")
+        self.assertEqual(body["visitFrequency"], "2x/week")
+        self.assertEqual(body["expectedVisitCount"], 12)
+
+
+class MobileCareDashboardTests(TestCase):
+    """mobile_care_dashboard() — the Mobile Care Home / Landing page's
+    backend: card counts plus the four section lists. Covers permission
+    enforcement (a non-scheduling role and a patient-portal account are
+    both rejected — this is the "Backend permissions must enforce access"
+    requirement, not just a frontend nav gate), tenant isolation, correct
+    counts/section membership, and the PT/PTA own-scope narrowing for
+    today's home visits and provider offers."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Dashboard PT", slug="dashboard-pt")
+        self.other_org = Organization.objects.create(name="Other Dashboard PT", slug="dashboard-other-pt")
+        self.admin = User.objects.create_user(
+            username="dash-admin", password="safe-test-password", organization=self.org, role=User.Role.ADMIN,
+        )
+        self.patient = Patient.objects.create(
+            organization=self.org, first_name="Dana", last_name="Dashboard", date_of_birth=date(1988, 1, 1),
+        )
+
+        self.pt_user = User.objects.create_user(
+            username="dash-pt", password="safe-test-password", organization=self.org, role=User.Role.THERAPIST,
+        )
+        self.pt_provider = Provider.objects.create(organization=self.org, user=self.pt_user, first_name="Dash", last_name="Therapist")
+        UserLicense.objects.create(
+            user=self.pt_user, license_number="PT-DASH", issuing_state="NC",
+            expires_at=date.today() + timedelta(days=365), verification_status=UserLicense.VerificationStatus.VERIFIED,
+        )
+        service_area = ServiceArea.objects.create(organization=self.org, provider=self.pt_provider, name="Primary", is_active=True, primary_zip_code="27526")
+        ServiceAreaZipCode.objects.create(service_area=service_area, zip_code="27526")
+
+        # Another org-scheduling-capable provider with an EXPIRED license —
+        # provider_ineligibility_reason() (which backs licenseProviderIssues)
+        # only flags an actually-expired license, not merely a missing one
+        # (license_alert_status is "none", not "expired", with no license
+        # on file at all) — counted here without affecting pt_provider's
+        # own eligibility in other assertions.
+        self.problem_user = User.objects.create_user(
+            username="dash-problem-provider", password="safe-test-password", organization=self.org, role=User.Role.THERAPIST,
+        )
+        self.problem_provider = Provider.objects.create(organization=self.org, user=self.problem_user, first_name="Expired", last_name="License")
+        UserLicense.objects.create(
+            user=self.problem_user, license_number="PT-EXPIRED", issuing_state="NC",
+            expires_at=date.today() - timedelta(days=1), verification_status=UserLicense.VerificationStatus.VERIFIED,
+        )
+
+        self.dashboard_url = reverse("api-mobile-care-dashboard")
+
+    def _open_request(self, *, matched_provider=None, status=MobileCareRequest.Status.PENDING):
+        return MobileCareRequest.objects.create(
+            organization=self.org, patient=self.patient, status=status, matched_provider=matched_provider,
+            address_line_1="1 Dashboard St", city="Cary", state="NC", zip_code="27526",
+            earliest_date=date.today() + timedelta(days=3),
+        )
+
+    def test_requires_scheduling_role(self):
+        biller = User.objects.create_user(
+            username="dash-biller", password="safe-test-password", organization=self.org, role=User.Role.BILLER,
+        )
+        self.client.force_login(biller)
+        response = self.client.get(self.dashboard_url)
+        self.assertEqual(response.status_code, 403)
+
+    def test_patient_portal_account_cannot_access_dashboard(self):
+        portal_user = User.objects.create_user(
+            username="dash-portal-patient", password="safe-test-password", organization=self.org, role=User.Role.PATIENT,
+        )
+        self.client.force_login(portal_user)
+        response = self.client.get(self.dashboard_url)
+        self.assertEqual(response.status_code, 403)
+
+    def test_super_admin_cannot_access_dashboard(self):
+        super_admin = User(username="dash-mc-super-admin", role=User.Role.SUPER_ADMIN, is_superuser=True)
+        super_admin.set_password("safe-test-password")
+        super_admin.full_clean()
+        super_admin.save()
+        self.client.force_login(super_admin)
+        response = self.client.get(self.dashboard_url)
+        self.assertEqual(response.status_code, 403)
+
+    def test_card_counts_and_sections(self):
+        unassigned = self._open_request()
+        self._open_request(matched_provider=self.pt_provider, status=MobileCareRequest.Status.MATCHED)
+        # Anchored on the local calendar date (not timezone.now().replace(),
+        # which keeps now()'s UTC date and can land on tomorrow whenever
+        # local time is already past 8pm America/New_York but UTC hasn't
+        # rolled over to the next day yet) to match localdate() in
+        # mobile_care_dashboard()'s "todaysHomeVisits" filter.
+        today_start = timezone.make_aware(datetime.combine(timezone.localdate(), time(9, 0)))
+        Appointment.objects.create(
+            patient=self.patient, therapist=self.pt_user, provider=self.pt_provider, is_home_visit=True,
+            status=Appointment.Status.SCHEDULED, starts_at=today_start, ends_at=today_start + timedelta(minutes=45),
+            created_by=self.admin,
+        )
+        offered_request = self._open_request()
+        ProviderMatch.objects.create(
+            organization=self.org, service_request=offered_request, provider=self.pt_provider, rank=1,
+            status=ProviderMatch.Status.OFFERED, offered_at=timezone.now(),
+        )
+        mobile_episode = EpisodeOfCare.objects.create(
+            organization=self.org, patient=self.patient, primary_therapist=self.pt_user, status=EpisodeOfCare.Status.ACTIVE,
+        )
+        MobileCareRequest.objects.filter(pk=offered_request.pk).update(episode_of_care=mobile_episode)
+        # A clinic-only episode (never linked to a mobile care request) must
+        # not be counted as an "active care episode" on this dashboard.
+        EpisodeOfCare.objects.create(organization=self.org, patient=self.patient, status=EpisodeOfCare.Status.ACTIVE)
+
+        self.client.force_login(self.admin)
+        response = self.client.get(self.dashboard_url)
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+
+        self.assertEqual(body["cardCounts"]["todaysHomeVisits"], 1)
+        self.assertEqual(body["cardCounts"]["pendingRequests"], 3)
+        self.assertEqual(body["cardCounts"]["providerOffers"], 1)
+        self.assertEqual(body["cardCounts"]["activeCareEpisodes"], 1)
+        self.assertEqual(body["cardCounts"]["visitsNeedingAssignment"], 2)
+        self.assertEqual(body["cardCounts"]["licenseProviderIssues"], 1)
+
+        self.assertIn(str(unassigned.pk), [row["id"] for row in body["unassignedRequests"]])
+        self.assertEqual(len(body["activeCareEpisodes"]), 1)
+        self.assertEqual(body["activeCareEpisodes"][0]["id"], str(mobile_episode.pk))
+
+    def test_tenant_isolation(self):
+        other_admin = User.objects.create_user(
+            username="dash-other-admin", password="safe-test-password", organization=self.other_org, role=User.Role.ADMIN,
+        )
+        self._open_request()
+
+        self.client.force_login(other_admin)
+        response = self.client.get(self.dashboard_url)
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["cardCounts"]["pendingRequests"], 0)
+        self.assertEqual(body["cardCounts"]["visitsNeedingAssignment"], 0)
+        self.assertEqual(body["pendingRequests"], [])
+
+    def test_therapist_sees_only_own_home_visits_and_offers(self):
+        other_pt_user = User.objects.create_user(
+            username="dash-other-pt", password="safe-test-password", organization=self.org, role=User.Role.THERAPIST,
+        )
+        other_provider = Provider.objects.create(organization=self.org, user=other_pt_user, first_name="Other", last_name="Therapist")
+
+        today_start = timezone.make_aware(datetime.combine(timezone.localdate(), time(10, 0)))
+        Appointment.objects.create(
+            patient=self.patient, therapist=self.pt_user, provider=self.pt_provider, is_home_visit=True,
+            status=Appointment.Status.SCHEDULED, starts_at=today_start, ends_at=today_start + timedelta(minutes=45),
+            created_by=self.admin,
+        )
+        Appointment.objects.create(
+            patient=self.patient, therapist=other_pt_user, provider=other_provider, is_home_visit=True,
+            status=Appointment.Status.SCHEDULED, starts_at=today_start, ends_at=today_start + timedelta(minutes=45),
+            created_by=self.admin,
+        )
+        request_a = self._open_request()
+        request_b = self._open_request()
+        ProviderMatch.objects.create(
+            organization=self.org, service_request=request_a, provider=self.pt_provider, rank=1,
+            status=ProviderMatch.Status.OFFERED, offered_at=timezone.now(),
+        )
+        ProviderMatch.objects.create(
+            organization=self.org, service_request=request_b, provider=other_provider, rank=1,
+            status=ProviderMatch.Status.OFFERED, offered_at=timezone.now(),
+        )
+
+        self.client.force_login(self.pt_user)
+        response = self.client.get(self.dashboard_url)
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+
+        self.assertEqual(body["cardCounts"]["todaysHomeVisits"], 1)
+        self.assertEqual(body["cardCounts"]["providerOffers"], 1)
+        # Pending/unassigned requests stay organization-wide for every
+        # scheduling-capable role, matching how the Requests tab has
+        # always behaved for PT/PTA (see mobile_care_dashboard()'s docstring).
+        self.assertGreaterEqual(body["cardCounts"]["pendingRequests"], 2)
+
+
+class ProviderHomeVisitWorkflowTests(TestCase):
+    """update_assignment_status() / ASSIGNMENT_STATUS_TRANSITIONS — the
+    provider's manual field-day state machine for "Today's Home Visits":
+    SCHEDULED -> EN_ROUTE -> ARRIVED -> IN_PROGRESS -> COMPLETED, or
+    CANCELLED from any non-terminal state. No GPS — every step is an
+    explicit provider action; the server rejects any transition not in
+    that table and records an audit event for every one that succeeds."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Field Workflow PT", slug="field-workflow-pt")
+        self.other_org = Organization.objects.create(name="Other Field Workflow PT", slug="field-workflow-other-pt")
+        self.admin = User.objects.create_user(
+            username="field-admin", password="safe-test-password", organization=self.org, role=User.Role.ADMIN,
+        )
+        self.patient = Patient.objects.create(
+            organization=self.org, first_name="Fiona", last_name="Field", date_of_birth=date(1990, 6, 15),
+        )
+        self.visit_weekday = 0  # Monday
+        today = date.today()
+        days_ahead = (self.visit_weekday - today.weekday()) % 7 or 7
+        self.visit_date = today + timedelta(days=days_ahead)
+
+        self.provider_user = User.objects.create_user(
+            username="field-provider", password="safe-test-password", organization=self.org, role=User.Role.THERAPIST,
+        )
+        self.provider = Provider.objects.create(organization=self.org, user=self.provider_user, first_name="Field", last_name="Therapist")
+        UserLicense.objects.create(
+            user=self.provider_user, license_number="PT-FIELD", issuing_state="NC",
+            expires_at=date.today() + timedelta(days=365), verification_status=UserLicense.VerificationStatus.VERIFIED,
+        )
+        service_area = ServiceArea.objects.create(
+            organization=self.org, provider=self.provider, name="Primary", is_active=True, primary_zip_code="27526",
+        )
+        ServiceAreaZipCode.objects.create(service_area=service_area, zip_code="27526")
+        HomeVisitAvailability.objects.create(
+            organization=self.org, provider=self.provider, availability_type=HomeVisitAvailability.AvailabilityType.AVAILABLE,
+            is_recurring=True, day_of_week=self.visit_weekday, start_time=time(8, 0), end_time=time(17, 0), is_active=True,
+        )
+
+        self.request = MobileCareRequest.objects.create(
+            organization=self.org, patient=self.patient,
+            address_line_1="1 Field St", city="Cary", state="NC", zip_code="27526",
+            earliest_date=self.visit_date, requested_service=MobileCareRequest.RequestedService.FOLLOW_UP,
+        )
+        match = generate_matches(self.request, actor=self.admin)[0]
+        offer_match(match, actor=self.admin)
+        _, self.assignment = respond_to_match(match, accept=True, actor=self.provider_user)
+
+    def _schedule(self):
+        starts_at = timezone.make_aware(datetime.combine(self.visit_date, time(9, 0)))
+        ends_at = starts_at + timedelta(minutes=45)
+        schedule_assignment(self.assignment, starts_at=starts_at, ends_at=ends_at, kind="follow_up", actor=self.provider_user)
+        self.assignment.refresh_from_db()
+        return self.assignment
+
+    def test_schedule_assignment_transitions_to_scheduled(self):
+        assignment = self._schedule()
+        self.assertEqual(assignment.status, HomeVisitAssignment.Status.SCHEDULED)
+        self.assertIsNotNone(assignment.scheduled_at)
+        self.assertIsNotNone(assignment.appointment_id)
+
+    def test_cannot_start_travel_before_scheduled(self):
+        # Still ACCEPTED — never scheduled — so EN_ROUTE has no entry in
+        # ASSIGNMENT_STATUS_TRANSITIONS for it and must be rejected.
+        self.assertEqual(self.assignment.status, HomeVisitAssignment.Status.ACCEPTED)
+        with self.assertRaises(ValidationError):
+            update_assignment_status(self.assignment, HomeVisitAssignment.Status.EN_ROUTE, actor=self.provider_user)
+
+    def test_full_valid_transition_chain_is_audited(self):
+        assignment = self._schedule()
+        chain = [
+            HomeVisitAssignment.Status.EN_ROUTE,
+            HomeVisitAssignment.Status.ARRIVED,
+            HomeVisitAssignment.Status.IN_PROGRESS,
+            HomeVisitAssignment.Status.COMPLETED,
+        ]
+        for new_status in chain:
+            update_assignment_status(assignment, new_status, actor=self.provider_user)
+            assignment.refresh_from_db()
+            self.assertEqual(assignment.status, new_status)
+
+        events = AuditEvent.objects.filter(action="home_visit_assignment.status_updated", object_id=assignment.pk).order_by("created_at")
+        audited_statuses = [event.metadata.get("status") for event in events]
+        self.assertEqual(audited_statuses, chain)
+
+    def test_en_route_stamps_timestamp_and_travel_status(self):
+        assignment = self._schedule()
+        update_assignment_status(assignment, HomeVisitAssignment.Status.EN_ROUTE, actor=self.provider_user)
+        assignment.refresh_from_db()
+        self.assertIsNotNone(assignment.en_route_at)
+        self.assertTrue(
+            VisitTravelStatus.objects.filter(assignment=assignment, status=HomeVisitAssignment.Status.EN_ROUTE).exists()
+        )
+
+    def test_invalid_transition_skipping_a_step_is_rejected(self):
+        assignment = self._schedule()
+        with self.assertRaises(ValidationError):
+            update_assignment_status(assignment, HomeVisitAssignment.Status.ARRIVED, actor=self.provider_user)
+        assignment.refresh_from_db()
+        self.assertEqual(assignment.status, HomeVisitAssignment.Status.SCHEDULED)
+
+    def test_cannot_transition_from_a_terminal_state(self):
+        assignment = self._schedule()
+        for status in (
+            HomeVisitAssignment.Status.EN_ROUTE, HomeVisitAssignment.Status.ARRIVED,
+            HomeVisitAssignment.Status.IN_PROGRESS, HomeVisitAssignment.Status.COMPLETED,
+        ):
+            update_assignment_status(assignment, status, actor=self.provider_user)
+            assignment.refresh_from_db()
+        with self.assertRaises(ValidationError):
+            update_assignment_status(assignment, HomeVisitAssignment.Status.EN_ROUTE, actor=self.provider_user)
+
+    def test_cancel_allowed_from_every_non_terminal_state(self):
+        for status in (
+            HomeVisitAssignment.Status.SCHEDULED,
+            HomeVisitAssignment.Status.EN_ROUTE,
+            HomeVisitAssignment.Status.ARRIVED,
+            HomeVisitAssignment.Status.IN_PROGRESS,
+        ):
+            self.assertIn(HomeVisitAssignment.Status.CANCELLED, ASSIGNMENT_STATUS_TRANSITIONS[status])
+
+    def test_completed_mirrors_onto_appointment_and_request(self):
+        assignment = self._schedule()
+        for status in (
+            HomeVisitAssignment.Status.EN_ROUTE, HomeVisitAssignment.Status.ARRIVED,
+            HomeVisitAssignment.Status.IN_PROGRESS, HomeVisitAssignment.Status.COMPLETED,
+        ):
+            update_assignment_status(assignment, status, actor=self.provider_user)
+            assignment.refresh_from_db()
+        assignment.appointment.refresh_from_db()
+        self.request.refresh_from_db()
+        self.assertEqual(assignment.appointment.status, Appointment.Status.COMPLETED)
+        self.assertEqual(self.request.status, MobileCareRequest.Status.COMPLETED)
+
+    def test_http_status_update_rejects_invalid_transition(self):
+        self._schedule()
+        self.client.force_login(self.provider_user)
+        response = self.client.post(
+            reverse("api-mobile-care-assignment-status", kwargs={"assignment_id": str(self.assignment.pk)}),
+            data=json.dumps({"status": "arrived"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 409)
+
+    def test_http_status_update_valid_transition(self):
+        self._schedule()
+        self.client.force_login(self.provider_user)
+        response = self.client.post(
+            reverse("api-mobile-care-assignment-status", kwargs={"assignment_id": str(self.assignment.pk)}),
+            data=json.dumps({"status": "en_route"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["assignment"]["status"], "en_route")
+
+    def test_other_provider_cannot_update_this_assignment(self):
+        self._schedule()
+        other_user = User.objects.create_user(
+            username="field-other-provider", password="safe-test-password", organization=self.org, role=User.Role.THERAPIST,
+        )
+        Provider.objects.create(organization=self.org, user=other_user, first_name="Other", last_name="Field")
+        self.client.force_login(other_user)
+        response = self.client.post(
+            reverse("api-mobile-care-assignment-status", kwargs={"assignment_id": str(self.assignment.pk)}),
+            data=json.dumps({"status": "en_route"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_todays_home_visits_endpoint_returns_scheduled_fields(self):
+        assignment = self._schedule()
+        # _schedule() books next Monday (matching the provider's recurring
+        # availability day, needed upstream for matching/eligibility) — the
+        # "today" endpoint needs an appointment actually on today's date;
+        # schedule_assignment() doesn't re-check availability, so moving
+        # the already-scheduled appointment to today is safe here.
+        today_start = timezone.localtime(timezone.now()).replace(hour=9, minute=0, second=0, microsecond=0)
+        Appointment.objects.filter(pk=assignment.appointment_id).update(
+            starts_at=today_start, ends_at=today_start + timedelta(minutes=45),
+        )
+        self.client.force_login(self.provider_user)
+        response = self.client.get(reverse("api-mobile-care-my-assignments-today"))
+        self.assertEqual(response.status_code, 200)
+        visits = response.json()["visits"]
+        self.assertEqual(len(visits), 1)
+        visit = visits[0]
+        self.assertEqual(visit["patient"]["fullName"], self.patient.full_name)
+        self.assertIsNotNone(visit["visitStartsAt"])
+        self.assertEqual(visit["addressLine1"], "1 Field St")
+        self.assertEqual(visit["visitKindLabel"], "Follow-up visit")
+        self.assertEqual(visit["status"], "scheduled")
+
+    def test_todays_home_visits_excludes_other_days(self):
+        assignment = self._schedule()
+        future_date = self.visit_date + timedelta(days=5)
+        Appointment.objects.filter(pk=assignment.appointment_id).update(
+            starts_at=timezone.make_aware(datetime.combine(future_date, time(9, 0))),
+            ends_at=timezone.make_aware(datetime.combine(future_date, time(9, 45))),
+        )
+        self.client.force_login(self.provider_user)
+        response = self.client.get(reverse("api-mobile-care-my-assignments-today"))
+        self.assertEqual(response.json()["visits"], [])
+
+    def test_todays_home_visits_tenant_and_provider_isolation(self):
+        self._schedule()
+        other_org_provider_user = User.objects.create_user(
+            username="field-other-org-provider", password="safe-test-password", organization=self.other_org, role=User.Role.THERAPIST,
+        )
+        Provider.objects.create(organization=self.other_org, user=other_org_provider_user, first_name="Cross", last_name="Tenant")
+
+        self.client.force_login(other_org_provider_user)
+        response = self.client.get(reverse("api-mobile-care-my-assignments-today"))
+        self.assertEqual(response.json()["visits"], [])
+
+
+class HomeVisitDocumentationIntegrationTests(TestCase):
+    """Home visit documentation reuses the existing Clinical Documentation
+    module end to end — the same ClinicalNote model and the same Encounter/
+    Goals/Plan of Care/Interventions/Outcome Measures/Signature/Addendum
+    machinery every other note type already uses, with the same locking
+    rules. The only new surface is two additive ClinicalNote.Type values
+    (home_visit, soap) and a home_visit_details JSON blob — mirroring the
+    existing discharge_details blob's pattern exactly — for context that
+    genuinely doesn't exist anywhere else in the chart, never a duplicate
+    of the shared clinical fields."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Home Visit Doc PT", slug="home-visit-doc-pt")
+        self.therapist = User.objects.create_user(
+            username="hvd-therapist", password="safe-test-password", organization=self.org, role=User.Role.THERAPIST,
+        )
+        self.patient = Patient.objects.create(
+            organization=self.org, first_name="Hazel", last_name="Visit", date_of_birth=date(1985, 3, 3),
+            assigned_therapist=self.therapist,
+        )
+        self.appointment = Appointment.objects.create(
+            patient=self.patient, therapist=self.therapist, kind=Appointment.Kind.FOLLOW_UP,
+            is_home_visit=True, starts_at=timezone.now(), ends_at=timezone.now() + timedelta(minutes=45),
+            created_by=self.therapist, status=Appointment.Status.CHECKED_IN,
+        )
+
+    def test_home_visit_and_soap_note_types_are_supported(self):
+        self.client.force_login(self.therapist)
+        for note_type in (ClinicalNote.Type.HOME_VISIT, ClinicalNote.Type.SOAP):
+            response = self.client.post(
+                reverse("api-note-create", kwargs={"patient_id": self.patient.pk}),
+                data=json.dumps({"noteType": note_type}),
+                content_type="application/json",
+            )
+            self.assertEqual(response.status_code, 201)
+            self.assertEqual(response.json()["note"]["noteType"], note_type)
+
+    def test_home_visit_note_links_to_the_home_visit_appointment(self):
+        self.client.force_login(self.therapist)
+        response = self.client.post(
+            reverse("api-note-create", kwargs={"patient_id": self.patient.pk}),
+            data=json.dumps({"noteType": ClinicalNote.Type.HOME_VISIT, "appointmentId": str(self.appointment.pk)}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 201)
+        note = ClinicalNote.objects.get(pk=response.json()["note"]["id"])
+        self.assertEqual(note.appointment_id, self.appointment.pk)
+
+    def test_home_visit_details_saved_and_retrieved(self):
+        note = ClinicalNote.objects.create(
+            patient=self.patient, therapist=self.therapist, appointment=self.appointment,
+            note_type=ClinicalNote.Type.HOME_VISIT,
+        )
+        self.client.force_login(self.therapist)
+        home_visit_details = {
+            "visitLocationType": "Patient's home",
+            "homeSafetyNotes": "Loose rug in hallway, recommended removal.",
+            "functionalEnvironment": "Single-story, no stairs.",
+            "caregiverPresent": "Spouse present and participated.",
+            "homeExerciseEducation": "Reviewed exercises 1-3 with patient.",
+            "equipmentAssistiveDevice": "Rolling walker available in home.",
+            "environmentalBarriers": "Narrow bathroom doorway.",
+        }
+        response = self.client.patch(
+            reverse("api-note-detail", kwargs={"note_id": note.pk}),
+            data=json.dumps({"homeVisitDetails": home_visit_details}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["note"]["homeVisitDetails"], home_visit_details)
+
+        get_response = self.client.get(reverse("api-note-detail", kwargs={"note_id": note.pk}))
+        self.assertEqual(get_response.json()["note"]["homeVisitDetails"], home_visit_details)
+
+    def test_home_visit_details_does_not_replace_existing_clinical_fields(self):
+        note = ClinicalNote.objects.create(
+            patient=self.patient, therapist=self.therapist, appointment=self.appointment,
+            note_type=ClinicalNote.Type.HOME_VISIT,
+        )
+        self.client.force_login(self.therapist)
+        response = self.client.patch(
+            reverse("api-note-detail", kwargs={"note_id": note.pk}),
+            data=json.dumps({
+                "subjective": "Patient reports less pain.",
+                "objective": "Gait improved.",
+                "assessment": "Progressing well.",
+                "plan": "Continue POC.",
+                "homeVisitDetails": {"visitLocationType": "Patient's home"},
+            }),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()["note"]
+        # The core S/O/A/P fields are the exact same shared columns every
+        # other note type already uses — nothing new was introduced there.
+        self.assertEqual(body["subjective"], "Patient reports less pain.")
+        self.assertEqual(body["objective"], "Gait improved.")
+        self.assertEqual(body["homeVisitDetails"], {"visitLocationType": "Patient's home"})
+        note.refresh_from_db()
+        self.assertEqual(note.subjective, "Patient reports less pain.")
+
+    def test_home_visit_details_locked_after_signing(self):
+        note = ClinicalNote.objects.create(
+            patient=self.patient, therapist=self.therapist, appointment=self.appointment,
+            note_type=ClinicalNote.Type.HOME_VISIT, objective="Gait improved.", assessment="Progressing.", plan="Continue.",
+        )
+        self.client.force_login(self.therapist)
+        self.client.patch(
+            reverse("api-note-detail", kwargs={"note_id": note.pk}),
+            data=json.dumps({"homeVisitDetails": {"visitLocationType": "Patient's home"}}),
+            content_type="application/json",
+        )
+        sign_response = self.client.post(
+            reverse("api-note-sign", kwargs={"note_id": note.pk}),
+            data=json.dumps({"attestation": True}),
+            content_type="application/json",
+        )
+        self.assertEqual(sign_response.status_code, 200)
+        note.refresh_from_db()
+        self.assertEqual(note.status, ClinicalNote.Status.SIGNED)
+
+        locked_response = self.client.patch(
+            reverse("api-note-detail", kwargs={"note_id": note.pk}),
+            data=json.dumps({"homeVisitDetails": {"visitLocationType": "Should not save"}}),
+            content_type="application/json",
+        )
+        self.assertEqual(locked_response.status_code, 403)
+        note.refresh_from_db()
+        self.assertEqual(note.home_visit_details, {"visitLocationType": "Patient's home"})
+
+    def test_addendum_still_works_on_a_signed_home_visit_note(self):
+        note = ClinicalNote.objects.create(
+            patient=self.patient, therapist=self.therapist, appointment=self.appointment,
+            note_type=ClinicalNote.Type.HOME_VISIT, objective="Gait improved.", assessment="Progressing.", plan="Continue.",
+            status=ClinicalNote.Status.SIGNED, signed_at=timezone.now(), signature_name="Test Therapist",
+        )
+        self.client.force_login(self.therapist)
+        response = self.client.post(
+            reverse("api-note-addendum-create", kwargs={"note_id": note.pk}),
+            data=json.dumps({"reason": "Clarification", "body": "Clarifying home safety note."}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(NoteAddendum.objects.filter(note=note).exists())
+
+    def test_interventions_reused_for_home_visit_notes(self):
+        note = ClinicalNote.objects.create(
+            patient=self.patient, therapist=self.therapist, appointment=self.appointment,
+            note_type=ClinicalNote.Type.HOME_VISIT,
+        )
+        self.client.force_login(self.therapist)
+        response = self.client.put(
+            reverse("api-note-interventions-replace", kwargs={"note_id": note.pk}),
+            data=json.dumps({"items": [{"description": "Gait training", "minutes": 15, "isTimed": True}]}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(NoteIntervention.objects.filter(note=note).exists())
+
+
+class PatientMobileCarePortalExperienceTests(TestCase):
+    """The patient-portal Mobile Care request experience: stage mapping
+    (_PATIENT_STAGE in care/api/patient_portal.py) across the real backend
+    status lifecycle, limited/appropriate provider info once matched (no
+    match score or ranking reasons), appointment details + general
+    instructions once scheduled, and the existing cancel/view-status/
+    tenant-isolation guarantees."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Portal Experience PT", slug="portal-experience-pt")
+        self.other_org = Organization.objects.create(name="Other Portal Experience PT", slug="portal-experience-other-pt")
+        self.admin = User.objects.create_user(
+            username="portal-exp-admin", password="safe-test-password", organization=self.org, role=User.Role.ADMIN,
+        )
+        self.patient = Patient.objects.create(
+            organization=self.org, first_name="Paula", last_name="Patient", date_of_birth=date(1988, 4, 12),
+            address="9 Existing Chart Address, Cary, NC 27526",
+        )
+        self.portal_user = User.objects.create_user(
+            username="portal-exp-patient", password="safe-test-password", organization=self.org, role=User.Role.PATIENT,
+        )
+        self.patient.portal_user = self.portal_user
+        self.patient.save(update_fields=["portal_user"])
+
+        self.visit_weekday = 0  # Monday
+        today = date.today()
+        days_ahead = (self.visit_weekday - today.weekday()) % 7 or 7
+        self.visit_date = today + timedelta(days=days_ahead)
+
+        self.provider_user = User.objects.create_user(
+            username="portal-exp-provider", password="safe-test-password", organization=self.org, role=User.Role.THERAPIST,
+        )
+        self.provider = Provider.objects.create(
+            organization=self.org, user=self.provider_user, first_name="Priya", last_name="Provider",
+            credentials="PT, DPT", specialty="Orthopedics",
+        )
+        UserLicense.objects.create(
+            user=self.provider_user, license_number="PT-PORTAL", issuing_state="NC",
+            expires_at=date.today() + timedelta(days=365), verification_status=UserLicense.VerificationStatus.VERIFIED,
+        )
+        service_area = ServiceArea.objects.create(
+            organization=self.org, provider=self.provider, name="Primary", is_active=True, primary_zip_code="27526",
+        )
+        ServiceAreaZipCode.objects.create(service_area=service_area, zip_code="27526")
+        HomeVisitAvailability.objects.create(
+            organization=self.org, provider=self.provider, availability_type=HomeVisitAvailability.AvailabilityType.AVAILABLE,
+            is_recurring=True, day_of_week=self.visit_weekday, start_time=time(8, 0), end_time=time(17, 0), is_active=True,
+        )
+
+        self.list_url = reverse("api-portal-mobile-care-requests")
+
+    def _detail_url(self, request_id):
+        return reverse("api-portal-mobile-care-request-detail", kwargs={"request_id": request_id})
+
+    def _create_request(self):
+        self.client.force_login(self.portal_user)
+        response = self.client.post(
+            self.list_url,
+            data=json.dumps({
+                "addressLine1": "1 Visit St", "city": "Cary", "state": "NC", "zipCode": "27526",
+                "earliestDate": self.visit_date.isoformat(),
+            }),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 201)
+        return response.json()["request"]["id"]
+
+    def test_stage_mapping_across_the_lifecycle(self):
+        request_id = self._create_request()
+        entry = MobileCareRequest.objects.get(pk=request_id)
+        self.assertEqual(entry.status, MobileCareRequest.Status.PENDING)
+
+        self.client.force_login(self.portal_user)
+        pending_response = self.client.get(self._detail_url(request_id))
+        self.assertEqual(pending_response.json()["request"]["stage"], "request_received")
+        self.assertEqual(pending_response.json()["request"]["stageLabel"], "Request Received")
+
+        match = generate_matches(entry, actor=self.admin)[0]
+        entry.refresh_from_db()
+        self.assertEqual(entry.status, MobileCareRequest.Status.MATCHING)
+        matching_response = self.client.get(self._detail_url(request_id))
+        self.assertEqual(matching_response.json()["request"]["stage"], "finding_therapist")
+
+        offer_match(match, actor=self.admin)
+        entry.refresh_from_db()
+        # offer_match() only changes the ProviderMatch's own status, not the
+        # parent request's — the request stays MATCHING until a provider
+        # actually accepts (see respond_to_match() below).
+        self.assertEqual(entry.status, MobileCareRequest.Status.MATCHING)
+
+        _, assignment = respond_to_match(match, accept=True, actor=self.provider_user)
+        entry.refresh_from_db()
+        self.assertEqual(entry.status, MobileCareRequest.Status.ACCEPTED)
+        accepted_response = self.client.get(self._detail_url(request_id))
+        self.assertEqual(accepted_response.json()["request"]["stage"], "therapist_matched")
+        self.assertEqual(accepted_response.json()["request"]["stageLabel"], "Therapist Matched")
+
+        starts_at = timezone.make_aware(datetime.combine(self.visit_date, time(9, 0)))
+        ends_at = starts_at + timedelta(minutes=45)
+        schedule_assignment(assignment, starts_at=starts_at, ends_at=ends_at, kind="follow_up", actor=self.provider_user)
+        scheduled_response = self.client.get(self._detail_url(request_id))
+        body = scheduled_response.json()["request"]
+        self.assertEqual(body["stage"], "visit_scheduled")
+        self.assertEqual(body["stageLabel"], "Visit Scheduled")
+        self.assertIsNotNone(body["appointmentStartsAt"])
+        self.assertIsNotNone(body["appointmentEndsAt"])
+        self.assertIsNotNone(body["visitInstructions"])
+
+    def test_visit_instructions_absent_before_scheduling(self):
+        request_id = self._create_request()
+        self.client.force_login(self.portal_user)
+        response = self.client.get(self._detail_url(request_id))
+        self.assertIsNone(response.json()["request"]["visitInstructions"])
+        self.assertIsNone(response.json()["request"]["appointmentStartsAt"])
+
+    def test_matched_provider_info_is_limited_and_no_score_leaks(self):
+        request_id = self._create_request()
+        entry = MobileCareRequest.objects.get(pk=request_id)
+        match = generate_matches(entry, actor=self.admin)[0]
+        offer_match(match, actor=self.admin)
+        respond_to_match(match, accept=True, actor=self.provider_user)
+
+        self.client.force_login(self.portal_user)
+        response = self.client.get(self._detail_url(request_id))
+        self.assertEqual(response.status_code, 200)
+        body = response.json()["request"]
+
+        self.assertEqual(body["matchedProviderName"], "Priya Provider")
+        self.assertEqual(body["matchedProviderCredentials"], "PT, DPT")
+        self.assertEqual(body["matchedProviderSpecialty"], "Orthopedics")
+
+        raw_body = response.content.decode().lower()
+        # ("license" and "ssn" deliberately excluded from this substring scan —
+        # "licensedfor..."/"licenseNumber" never appear here anyway, and "ssn"
+        # false-positives inside unrelated words like "homeAcce-ssn-otes".)
+        for leaked_term in ("score", "rank", "reasons", "breakdown", "matchreason"):
+            self.assertNotIn(leaked_term, raw_body)
+
+    def test_patient_can_cancel_and_view_status(self):
+        request_id = self._create_request()
+        self.client.force_login(self.portal_user)
+        detail = self.client.get(self._detail_url(request_id))
+        self.assertEqual(detail.status_code, 200)
+        self.assertTrue(detail.json()["request"]["canCancel"])
+
+        cancel_response = self.client.post(reverse("api-portal-mobile-care-request-cancel", kwargs={"request_id": request_id}))
+        self.assertEqual(cancel_response.status_code, 200)
+        entry = MobileCareRequest.objects.get(pk=request_id)
+        self.assertEqual(entry.status, MobileCareRequest.Status.CANCELLED)
+
+    def test_cannot_view_another_patients_request(self):
+        request_id = self._create_request()
+        other_portal_user = User.objects.create_user(
+            username="portal-exp-other-patient", password="safe-test-password", organization=self.org, role=User.Role.PATIENT,
+        )
+        other_patient = Patient.objects.create(
+            organization=self.org, first_name="Not", last_name="Yours", date_of_birth=date(1991, 1, 1), portal_user=other_portal_user,
+        )
+        del other_patient
+
+        self.client.force_login(other_portal_user)
+        response = self.client.get(self._detail_url(request_id))
+        self.assertEqual(response.status_code, 404)
+
+    def test_tenant_isolation_between_organizations(self):
+        request_id = self._create_request()
+        other_org_portal_user = User.objects.create_user(
+            username="portal-exp-cross-org-patient", password="safe-test-password", organization=self.other_org, role=User.Role.PATIENT,
+        )
+        other_org_patient = Patient.objects.create(
+            organization=self.other_org, first_name="Cross", last_name="Tenant", date_of_birth=date(1992, 2, 2),
+            portal_user=other_org_portal_user,
+        )
+        del other_org_patient
+
+        self.client.force_login(other_org_portal_user)
+        response = self.client.get(self._detail_url(request_id))
+        self.assertEqual(response.status_code, 404)
+
+    def test_address_confirmation_reuses_chart_address_without_duplicating_it(self):
+        # The wizard's "confirm visit address" step offers a one-time
+        # copy-in from the chart address (frontend-side convenience) — the
+        # request itself never reads Patient.address directly; it stores
+        # only whatever the patient actually submitted for this visit.
+        request_id = self._create_request()
+        entry = MobileCareRequest.objects.get(pk=request_id)
+        self.assertEqual(entry.address_line_1, "1 Visit St")
+        self.assertNotEqual(entry.address_line_1, self.patient.address)
+
+
+class MobileCareNotificationTests(TestCase):
+    """care/mobile_care_notifications.py — the 11 Mobile Care events across
+    in-app/email/SMS, wired into their real call sites in
+    care/mobile_care.py. Covers the delivery-status audit trail (via the
+    same AuditEvent every other event in this app already uses), the
+    email/SMS notification preferences on Patient, the honest
+    SMS_BACKEND_CONFIGURED no-op (no SMS provider exists in this codebase),
+    and the "no unnecessary PHI" content policy."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Notify PT", slug="notify-pt")
+        self.admin = User.objects.create_user(
+            username="notify-admin", password="safe-test-password", organization=self.org, role=User.Role.ADMIN,
+        )
+        self.portal_user = User.objects.create_user(
+            username="notify-patient", password="safe-test-password", organization=self.org, role=User.Role.PATIENT,
+            email="patient@example.com",
+        )
+        self.patient = Patient.objects.create(
+            organization=self.org, first_name="Nora", last_name="Notify", date_of_birth=date(1985, 5, 5),
+            phone="9195550100", portal_user=self.portal_user,
+            email_notifications_enabled=True, sms_notifications_enabled=True,
+            diagnoses="Confidential Diagnosis Text",
+        )
+
+        self.visit_weekday = 0  # Monday
+        today = date.today()
+        days_ahead = (self.visit_weekday - today.weekday()) % 7 or 7
+        self.visit_date = today + timedelta(days=days_ahead)
+
+        self.provider_user = User.objects.create_user(
+            username="notify-provider", password="safe-test-password", organization=self.org, role=User.Role.THERAPIST,
+            email="provider@example.com",
+        )
+        self.provider = Provider.objects.create(
+            organization=self.org, user=self.provider_user, first_name="Nick", last_name="Notify", credentials="PT, DPT",
+        )
+        UserLicense.objects.create(
+            user=self.provider_user, license_number="PT-NOTIFY", issuing_state="NC",
+            expires_at=date.today() + timedelta(days=365), verification_status=UserLicense.VerificationStatus.VERIFIED,
+        )
+        service_area = ServiceArea.objects.create(
+            organization=self.org, provider=self.provider, name="Primary", is_active=True, primary_zip_code="27526",
+        )
+        ServiceAreaZipCode.objects.create(service_area=service_area, zip_code="27526")
+        HomeVisitAvailability.objects.create(
+            organization=self.org, provider=self.provider, availability_type=HomeVisitAvailability.AvailabilityType.AVAILABLE,
+            is_recurring=True, day_of_week=self.visit_weekday, start_time=time(8, 0), end_time=time(17, 0), is_active=True,
+        )
+
+    def _create_request(self, **overrides):
+        defaults = dict(
+            source=MobileCareRequest.Source.FRONT_DESK,
+            address_line_1="1 Notify St", city="Cary", state="NC", zip_code="27526",
+            earliest_date=self.visit_date, created_by=self.admin,
+            reason_for_visit="Sensitive clinical reason text", primary_condition="Sensitive condition text",
+        )
+        defaults.update(overrides)
+        return create_request(self.patient, **defaults)
+
+    def _matched_and_accepted_request(self):
+        entry = self._create_request()
+        match = generate_matches(entry, actor=self.admin)[0]
+        offer_match(match, actor=self.admin)
+        _, assignment = respond_to_match(match, accept=True, actor=self.provider_user)
+        return entry, match, assignment
+
+    def _events(self, event, channel=None):
+        queryset = AuditEvent.objects.filter(action="MOBILE_CARE_NOTIFICATION", metadata__event=event)
+        if channel:
+            queryset = queryset.filter(metadata__channel=channel)
+        return queryset
+
+    def test_sms_backend_is_not_configured_by_default(self):
+        # Honest reflection of this codebase's actual state — no SMS
+        # provider is wired in (see the module docstring).
+        self.assertFalse(mobile_care_notifications.SMS_BACKEND_CONFIGURED)
+
+    def test_service_request_created_notifies_all_three_channels(self):
+        mail.outbox = []
+        entry = self._create_request()
+
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn("received", mail.outbox[0].subject.lower())
+        self.assertTrue(self._events("SERVICE_REQUEST_CREATED", "email").filter(metadata__status="delivered").exists())
+        self.assertTrue(self._events("SERVICE_REQUEST_CREATED", "sms").filter(metadata__status="skipped_not_configured").exists())
+        self.assertTrue(self._events("SERVICE_REQUEST_CREATED", "in_app").filter(metadata__status="delivered").exists())
+        del entry
+
+    def test_email_notification_skipped_when_patient_opts_out(self):
+        self.patient.email_notifications_enabled = False
+        self.patient.save(update_fields=["email_notifications_enabled"])
+        mail.outbox = []
+
+        self._create_request()
+
+        self.assertEqual(len(mail.outbox), 0)
+        self.assertTrue(self._events("SERVICE_REQUEST_CREATED", "email").filter(metadata__status="skipped_preference").exists())
+
+    def test_sms_notification_skipped_when_patient_opts_out(self):
+        self.patient.sms_notifications_enabled = False
+        self.patient.save(update_fields=["sms_notifications_enabled"])
+
+        self._create_request()
+
+        self.assertTrue(self._events("SERVICE_REQUEST_CREATED", "sms").filter(metadata__status="skipped_preference").exists())
+
+    def test_sms_notification_skipped_with_no_phone_on_file(self):
+        self.patient.phone = ""
+        self.patient.save(update_fields=["phone"])
+
+        self._create_request()
+
+        self.assertTrue(self._events("SERVICE_REQUEST_CREATED", "sms").filter(metadata__status="skipped_no_contact").exists())
+
+    def test_provider_match_found_is_in_app_only(self):
+        entry = self._create_request()
+        mail.outbox = []
+        generate_matches(entry, actor=self.admin)
+
+        self.assertEqual(len(mail.outbox), 0)
+        self.assertTrue(self._events("PROVIDER_MATCH_FOUND", "in_app").filter(metadata__status="delivered").exists())
+        self.assertFalse(self._events("PROVIDER_MATCH_FOUND", "email").exists())
+
+    def test_provider_offer_created_emails_the_provider(self):
+        entry = self._create_request()
+        match = generate_matches(entry, actor=self.admin)[0]
+        mail.outbox = []
+
+        offer_match(match, actor=self.admin)
+
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ["provider@example.com"])
+        self.assertTrue(self._events("PROVIDER_OFFER_CREATED", "email").filter(metadata__status="delivered", metadata__recipient="provider@example.com").exists())
+
+    def test_provider_offer_accepted_notifies_patient_with_provider_name(self):
+        entry = self._create_request()
+        match = generate_matches(entry, actor=self.admin)[0]
+        offer_match(match, actor=self.admin)
+        mail.outbox = []
+
+        respond_to_match(match, accept=True, actor=self.provider_user)
+
+        patient_emails = [msg for msg in mail.outbox if msg.to == ["patient@example.com"]]
+        self.assertEqual(len(patient_emails), 1)
+        self.assertIn("Nick Notify", patient_emails[0].body)
+        self.assertTrue(self._events("PROVIDER_OFFER_ACCEPTED", "email").filter(metadata__status="delivered").exists())
+        self.assertTrue(self._events("PROVIDER_OFFER_ACCEPTED", "in_app").exists())
+
+    def test_provider_offer_declined_is_in_app_only(self):
+        second_provider_user = User.objects.create_user(
+            username="notify-second-provider", password="safe-test-password", organization=self.org, role=User.Role.THERAPIST,
+        )
+        second_provider = Provider.objects.create(organization=self.org, user=second_provider_user, first_name="Second", last_name="Provider")
+        UserLicense.objects.create(
+            user=second_provider_user, license_number="PT-NOTIFY-2", issuing_state="NC",
+            expires_at=date.today() + timedelta(days=365), verification_status=UserLicense.VerificationStatus.VERIFIED,
+        )
+        service_area = ServiceArea.objects.create(organization=self.org, provider=second_provider, name="Primary", is_active=True, primary_zip_code="27526")
+        ServiceAreaZipCode.objects.create(service_area=service_area, zip_code="27526")
+        HomeVisitAvailability.objects.create(
+            organization=self.org, provider=second_provider, availability_type=HomeVisitAvailability.AvailabilityType.AVAILABLE,
+            is_recurring=True, day_of_week=self.visit_weekday, start_time=time(8, 0), end_time=time(17, 0), is_active=True,
+        )
+
+        entry = self._create_request()
+        matches = generate_matches(entry, actor=self.admin)
+        self.assertEqual(len(matches), 2)
+        first_match = entry.matches.get(provider=self.provider)
+        offer_match(first_match, actor=self.admin)
+
+        mail.outbox = []
+        respond_to_match(first_match, accept=False, actor=self.provider_user)
+
+        self.assertEqual(len(mail.outbox), 0)
+        self.assertTrue(self._events("PROVIDER_OFFER_DECLINED", "in_app").filter(metadata__status="delivered").exists())
+
+    def test_visit_scheduled_notifies_patient_and_provider_with_no_phi(self):
+        entry, match, assignment = self._matched_and_accepted_request()
+        mail.outbox = []
+        starts_at = timezone.make_aware(datetime.combine(self.visit_date, time(14, 0)))
+        ends_at = starts_at + timedelta(minutes=45)
+
+        schedule_assignment(assignment, starts_at=starts_at, ends_at=ends_at, kind="follow_up", actor=self.provider_user)
+
+        recipients = {msg.to[0] for msg in mail.outbox}
+        self.assertIn("patient@example.com", recipients)
+        self.assertIn("provider@example.com", recipients)
+        for msg in mail.outbox:
+            self.assertNotIn("Sensitive clinical reason text", msg.body)
+            self.assertNotIn("Sensitive condition text", msg.body)
+            self.assertNotIn("Confidential Diagnosis Text", msg.body)
+        patient_email = next(msg for msg in mail.outbox if msg.to == ["patient@example.com"])
+        self.assertIn("2:00 PM", patient_email.body)
+        del match
+
+    def test_visit_reminder_sent_once_and_deduped(self):
+        entry, match, assignment = self._matched_and_accepted_request()
+        starts_at = timezone.localtime(timezone.now()) + timedelta(days=1)
+        starts_at = starts_at.replace(hour=14, minute=0, second=0, microsecond=0)
+        appointment = schedule_assignment(assignment, starts_at=starts_at, ends_at=starts_at + timedelta(minutes=45), kind="follow_up", actor=self.provider_user)
+
+        self.assertFalse(mobile_care_notifications.reminder_already_sent(appointment))
+        mail.outbox = []
+        call_command("send_home_visit_reminders")
+
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn("2:00 PM", mail.outbox[0].body)
+        self.assertTrue(mobile_care_notifications.reminder_already_sent(appointment))
+
+        mail.outbox = []
+        call_command("send_home_visit_reminders")
+        self.assertEqual(len(mail.outbox), 0)  # not sent twice
+        del match, entry
+
+    def test_provider_en_route_and_arrived(self):
+        entry, match, assignment = self._matched_and_accepted_request()
+        starts_at = timezone.make_aware(datetime.combine(self.visit_date, time(9, 0)))
+        schedule_assignment(assignment, starts_at=starts_at, ends_at=starts_at + timedelta(minutes=45), kind="follow_up", actor=self.provider_user)
+        assignment.refresh_from_db()
+
+        mail.outbox = []
+        update_assignment_status(assignment, HomeVisitAssignment.Status.EN_ROUTE, actor=self.provider_user)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn("on the way", mail.outbox[0].body)
+        self.assertTrue(self._events("PROVIDER_EN_ROUTE", "sms").exists())
+
+        mail.outbox = []
+        update_assignment_status(assignment, HomeVisitAssignment.Status.ARRIVED, actor=self.provider_user)
+        self.assertEqual(len(mail.outbox), 0)  # arrived is in-app/audit only by design
+        self.assertTrue(self._events("PROVIDER_ARRIVED", "in_app").filter(metadata__status="delivered").exists())
+        del match, entry
+
+    def test_visit_completed_notifies_patient(self):
+        entry, match, assignment = self._matched_and_accepted_request()
+        starts_at = timezone.make_aware(datetime.combine(self.visit_date, time(9, 0)))
+        schedule_assignment(assignment, starts_at=starts_at, ends_at=starts_at + timedelta(minutes=45), kind="follow_up", actor=self.provider_user)
+        assignment.refresh_from_db()
+        update_assignment_status(assignment, HomeVisitAssignment.Status.EN_ROUTE, actor=self.provider_user)
+        update_assignment_status(assignment, HomeVisitAssignment.Status.ARRIVED, actor=self.provider_user)
+        update_assignment_status(assignment, HomeVisitAssignment.Status.IN_PROGRESS, actor=self.provider_user)
+
+        mail.outbox = []
+        update_assignment_status(assignment, HomeVisitAssignment.Status.COMPLETED, actor=self.provider_user)
+
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ["patient@example.com"])
+        self.assertTrue(self._events("VISIT_COMPLETED", "email").filter(metadata__status="delivered").exists())
+        del match, entry
+
+    def test_visit_cancelled_via_staff_cancel_notifies_patient_and_provider(self):
+        entry, match, assignment = self._matched_and_accepted_request()
+        starts_at = timezone.make_aware(datetime.combine(self.visit_date, time(9, 0)))
+        schedule_assignment(assignment, starts_at=starts_at, ends_at=starts_at + timedelta(minutes=45), kind="follow_up", actor=self.provider_user)
+        entry.refresh_from_db()
+
+        mail.outbox = []
+        cancel_request(entry, actor=self.admin, reason="Patient request")
+
+        recipients = {msg.to[0] for msg in mail.outbox}
+        self.assertIn("patient@example.com", recipients)
+        self.assertIn("provider@example.com", recipients)
+        self.assertTrue(self._events("VISIT_CANCELLED", "email").filter(metadata__status="delivered").exists())
+        del match
+
+    def test_notification_delivery_audit_never_records_clinical_metadata(self):
+        mail.outbox = []
+        entry = self._create_request()
+
+        events = self._events("SERVICE_REQUEST_CREATED")
+        self.assertTrue(events.exists())
+        for event in events:
+            self.assertNotIn("Sensitive clinical reason text", str(event.metadata))
+            self.assertNotIn("Sensitive condition text", str(event.metadata))
+
+
+class RouteDistanceSupportTests(TestCase):
+    """care/mapping.py's GeocodingService/DistanceService/DirectionsService
+    abstraction (Module 14) plus care/mobile_care.py's call sites that use
+    it. No geocoding/distance provider is connected in this codebase, so
+    Manual* honestly reports unavailable rather than fabricating
+    coordinates or mileage — mirrors ManualTelehealthProvider's contract.
+    Directions are real (a keyless Google Maps deep link) since no paid
+    API is required. Coordinates are cached only on ServiceArea (a
+    provider's declared coverage-area origin — never a home address,
+    since none is stored for a provider) and MobileCareRequest (the visit
+    address); continuous GPS tracking is untouched (ProviderLocationSnapshot)."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Route PT", slug="route-pt")
+        self.other_org = Organization.objects.create(name="Other Route PT", slug="route-other-pt")
+        self.admin = User.objects.create_user(
+            username="route-admin", password="safe-test-password", organization=self.org, role=User.Role.ADMIN,
+        )
+        self.patient = Patient.objects.create(
+            organization=self.org, first_name="Remy", last_name="Route", date_of_birth=date(1991, 3, 3),
+        )
+        self.provider_user = User.objects.create_user(
+            username="route-provider", password="safe-test-password", organization=self.org, role=User.Role.THERAPIST,
+        )
+        self.provider = Provider.objects.create(organization=self.org, user=self.provider_user, first_name="Rory", last_name="Route")
+        self.service_area = ServiceArea.objects.create(
+            organization=self.org, provider=self.provider, name="Primary", is_active=True,
+            primary_zip_code="27526", city="Cary", state="NC",
+        )
+        ServiceAreaZipCode.objects.create(service_area=self.service_area, zip_code="27526")
+        self.mobile_request = MobileCareRequest.objects.create(
+            organization=self.org, patient=self.patient,
+            address_line_1="1 Route St", city="Cary", state="NC", zip_code="27526",
+            earliest_date=date.today() + timedelta(days=3),
+        )
+        self.directions_url = reverse("api-mobile-care-directions")
+
+    # --- care/mapping.py's default implementations, in isolation --------
+
+    def test_manual_geocoding_service_never_fabricates_coordinates(self):
+        result = mapping.ManualGeocodingService().geocode(
+            address_line_1="1 Route St", city="Cary", state="NC", zip_code="27526",
+        )
+        self.assertFalse(result.geocoded)
+        self.assertIsNone(result.coordinates)
+        self.assertEqual(result.formatted_address, "1 Route St, Cary, NC 27526")
+        self.assertEqual(result.message, mapping.ManualGeocodingService.NOT_CONNECTED)
+
+    def test_manual_distance_service_never_fabricates_mileage(self):
+        result = mapping.ManualDistanceService().estimate(
+            origin=mapping.Coordinates(35.7, -78.8), destination=mapping.Coordinates(35.8, -78.9),
+        )
+        self.assertFalse(result.available)
+        self.assertIsNone(result.distance_miles)
+        self.assertIsNone(result.estimated_drive_minutes)
+        self.assertEqual(result.message, mapping.ManualDistanceService.NOT_CONNECTED)
+
+    def test_google_maps_directions_service_builds_a_real_url(self):
+        result = mapping.GoogleMapsDirectionsService().build_directions_url(
+            destination_address="1 Route St, Cary, NC 27526", origin_address="27526",
+        )
+        self.assertTrue(result.available)
+        self.assertTrue(result.url.startswith("https://www.google.com/maps/dir/?"))
+        self.assertIn("destination=1+Route+St%2C+Cary%2C+NC+27526", result.url)
+        self.assertIn("origin=27526", result.url)
+
+    def test_google_maps_directions_service_rejects_blank_destination(self):
+        result = mapping.GoogleMapsDirectionsService().build_directions_url(destination_address="   ")
+        self.assertFalse(result.available)
+        self.assertIsNone(result.url)
+
+    def test_factories_return_the_current_default_implementations(self):
+        # The single swap point for a future real integration — verifying
+        # today's defaults, not hard-coding a vendor into any call site.
+        self.assertIsInstance(mapping.get_geocoding_service(self.org), mapping.ManualGeocodingService)
+        self.assertIsInstance(mapping.get_distance_service(self.org), mapping.ManualDistanceService)
+        self.assertIsInstance(mapping.get_directions_service(self.org), mapping.GoogleMapsDirectionsService)
+
+    # --- geocode_mobile_care_request() / geocode_service_area() caching -
+
+    def test_geocode_mobile_care_request_is_unavailable_with_no_provider_connected(self):
+        result = geocode_mobile_care_request(self.mobile_request)
+        self.assertFalse(result.geocoded)
+        self.mobile_request.refresh_from_db()
+        self.assertIsNone(self.mobile_request.latitude)
+        self.assertIsNone(self.mobile_request.longitude)
+
+    @patch("care.mobile_care.get_geocoding_service")
+    def test_geocode_mobile_care_request_caches_on_first_success_and_skips_provider_on_second_call(self, mock_get_service):
+        stub = mock_get_service.return_value
+        stub.geocode.return_value = mapping.GeocodeResult(
+            geocoded=True, coordinates=mapping.Coordinates(35.79, -78.78), formatted_address="1 Route St", message="",
+        )
+
+        first = geocode_mobile_care_request(self.mobile_request)
+        self.assertTrue(first.geocoded)
+        self.mobile_request.refresh_from_db()
+        self.assertEqual(self.mobile_request.latitude, Decimal("35.790000"))
+        self.assertEqual(self.mobile_request.longitude, Decimal("-78.780000"))
+
+        second = geocode_mobile_care_request(self.mobile_request)
+        self.assertTrue(second.geocoded)
+        self.assertEqual(second.coordinates, mapping.Coordinates(35.79, -78.78))
+        stub.geocode.assert_called_once()  # cached — not re-geocoded
+
+    def test_geocode_service_area_never_touches_a_home_address_field(self):
+        # ServiceArea has no home-address field at all — geocode_service_area()
+        # only ever reads its declared coverage-area city/state/ZIP.
+        self.assertFalse(hasattr(self.service_area, "home_address"))
+        result = geocode_service_area(self.service_area)
+        self.assertFalse(result.geocoded)
+        self.assertEqual(result.message, mapping.ManualGeocodingService.NOT_CONNECTED)
+
+    @patch("care.mobile_care.get_geocoding_service")
+    def test_geocode_service_area_caches_coordinates(self, mock_get_service):
+        stub = mock_get_service.return_value
+        stub.geocode.return_value = mapping.GeocodeResult(
+            geocoded=True, coordinates=mapping.Coordinates(35.79, -78.78), formatted_address="Cary, NC", message="",
+        )
+        geocode_service_area(self.service_area)
+        self.service_area.refresh_from_db()
+        self.assertEqual(self.service_area.latitude, Decimal("35.790000"))
+
+        geocode_service_area(self.service_area)
+        stub.geocode.assert_called_once()
+
+    # --- estimate_provider_distance() -----------------------------------
+
+    def test_estimate_provider_distance_with_no_service_area_is_honest(self):
+        bare_provider = Provider.objects.create(organization=self.org, user=self.admin, first_name="No", last_name="Area")
+        result = estimate_provider_distance(bare_provider, self.mobile_request)
+        self.assertFalse(result.available)
+        self.assertIn("no declared service area", result.message)
+
+    def test_estimate_provider_distance_unavailable_when_geocoding_not_connected(self):
+        result = estimate_provider_distance(self.provider, self.mobile_request)
+        self.assertFalse(result.available)
+        self.assertIsNone(result.distance_miles)
+
+    @patch("care.mobile_care.get_distance_service")
+    @patch("care.mobile_care.get_geocoding_service")
+    def test_estimate_provider_distance_uses_connected_providers_end_to_end(self, mock_geocoding, mock_distance):
+        geocoding_stub = mock_geocoding.return_value
+        geocoding_stub.geocode.side_effect = [
+            mapping.GeocodeResult(geocoded=True, coordinates=mapping.Coordinates(35.79, -78.78), formatted_address="Cary, NC", message=""),
+            mapping.GeocodeResult(geocoded=True, coordinates=mapping.Coordinates(35.80, -78.90), formatted_address="1 Route St", message=""),
+        ]
+        distance_stub = mock_distance.return_value
+        distance_stub.estimate.return_value = mapping.DistanceResult(
+            available=True, distance_miles=8.4, estimated_drive_minutes=17, message="",
+        )
+
+        result = estimate_provider_distance(self.provider, self.mobile_request)
+
+        self.assertTrue(result.available)
+        self.assertEqual(result.distance_miles, 8.4)
+        self.assertEqual(result.estimated_drive_minutes, 17)
+        distance_stub.estimate.assert_called_once_with(
+            origin=mapping.Coordinates(35.79, -78.78), destination=mapping.Coordinates(35.80, -78.90),
+        )
+
+    # --- directions (genuinely working today) ---------------------------
+
+    def test_build_visit_directions_url_uses_the_visit_address(self):
+        result = build_visit_directions_url(self.mobile_request)
+        self.assertTrue(result.available)
+        self.assertIn("1+Route+St", result.url)
+        self.assertIn("Cary", result.url)
+
+    def test_build_directions_url_for_address_works_for_a_plain_string(self):
+        result = build_directions_url_for_address(self.org, "500 Legacy Way, Raleigh, NC 27601")
+        self.assertTrue(result.available)
+        self.assertIn("500+Legacy+Way", result.url)
+
+    def test_build_directions_url_for_address_rejects_blank_address(self):
+        result = build_directions_url_for_address(self.org, "")
+        self.assertFalse(result.available)
+
+    # --- mobile_care_directions API view ---------------------------------
+
+    def test_directions_endpoint_requires_login(self):
+        response = self.client.get(self.directions_url, {"address": "1 Route St, Cary, NC"})
+        self.assertEqual(response.status_code, 401)
+
+    def test_directions_endpoint_requires_scheduling_role(self):
+        biller = User.objects.create_user(
+            username="route-biller", password="safe-test-password", organization=self.org, role=User.Role.BILLER,
+        )
+        self.client.force_login(biller)
+        response = self.client.get(self.directions_url, {"address": "1 Route St, Cary, NC"})
+        self.assertEqual(response.status_code, 403)
+
+    def test_directions_endpoint_requires_an_address(self):
+        self.client.force_login(self.admin)
+        response = self.client.get(self.directions_url)
+        self.assertEqual(response.status_code, 400)
+
+    def test_directions_endpoint_returns_a_working_url(self):
+        self.client.force_login(self.admin)
+        response = self.client.get(self.directions_url, {"address": "1 Route St, Cary, NC 27526"})
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertTrue(body["available"])
+        self.assertIn("1+Route+St", body["url"])
+
+
+class LiveLocationTrackingArchitectureTests(TestCase):
+    """ProviderLocationSession / ProviderLocationSnapshot — the future
+    live-tracking architecture. Live GPS capture is still off in practice
+    (no mobile client sends pings), but every backend primitive is real:
+    a session opens exactly when an assignment goes EN_ROUTE, closes (and
+    deletes every ping in it) the moment it stops being EN_ROUTE for any
+    reason, and a patient only ever sees a derived minutes-away estimate —
+    never a raw coordinate or a ping history."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Track PT", slug="track-pt")
+        self.admin = User.objects.create_user(
+            username="track-admin", password="safe-test-password", organization=self.org, role=User.Role.ADMIN,
+        )
+        self.patient = Patient.objects.create(
+            organization=self.org, first_name="Tracy", last_name="Track", date_of_birth=date(1990, 4, 4),
+        )
+        self.visit_weekday = 0  # Monday
+        today = date.today()
+        days_ahead = (self.visit_weekday - today.weekday()) % 7 or 7
+        self.visit_date = today + timedelta(days=days_ahead)
+
+        self.provider_user = User.objects.create_user(
+            username="track-provider", password="safe-test-password", organization=self.org, role=User.Role.THERAPIST,
+        )
+        self.provider = Provider.objects.create(organization=self.org, user=self.provider_user, first_name="Trace", last_name="Therapist")
+        UserLicense.objects.create(
+            user=self.provider_user, license_number="PT-TRACK", issuing_state="NC",
+            expires_at=date.today() + timedelta(days=365), verification_status=UserLicense.VerificationStatus.VERIFIED,
+        )
+        service_area = ServiceArea.objects.create(
+            organization=self.org, provider=self.provider, name="Primary", is_active=True, primary_zip_code="27526",
+        )
+        ServiceAreaZipCode.objects.create(service_area=service_area, zip_code="27526")
+        HomeVisitAvailability.objects.create(
+            organization=self.org, provider=self.provider, availability_type=HomeVisitAvailability.AvailabilityType.AVAILABLE,
+            is_recurring=True, day_of_week=self.visit_weekday, start_time=time(8, 0), end_time=time(17, 0), is_active=True,
+        )
+
+        self.request = MobileCareRequest.objects.create(
+            organization=self.org, patient=self.patient,
+            address_line_1="1 Track St", city="Cary", state="NC", zip_code="27526",
+            earliest_date=self.visit_date, requested_service=MobileCareRequest.RequestedService.FOLLOW_UP,
+        )
+        match = generate_matches(self.request, actor=self.admin)[0]
+        offer_match(match, actor=self.admin)
+        _, self.assignment = respond_to_match(match, accept=True, actor=self.provider_user)
+
+    def _schedule(self):
+        starts_at = timezone.make_aware(datetime.combine(self.visit_date, time(9, 0)))
+        ends_at = starts_at + timedelta(minutes=45)
+        schedule_assignment(self.assignment, starts_at=starts_at, ends_at=ends_at, kind="follow_up", actor=self.provider_user)
+        self.assignment.refresh_from_db()
+        return self.assignment
+
+    def _open_session(self):
+        self._schedule()
+        self.provider.location_sharing_enabled = True
+        self.provider.save(update_fields=["location_sharing_enabled"])
+        update_assignment_status(self.assignment, HomeVisitAssignment.Status.EN_ROUTE, actor=self.provider_user)
+        self.assignment.refresh_from_db()
+        return self.assignment.location_sessions.get(ended_at__isnull=True)
+
+    # --- session lifecycle, driven by update_assignment_status() ---------
+
+    def test_en_route_opens_a_session(self):
+        self._schedule()
+        update_assignment_status(self.assignment, HomeVisitAssignment.Status.EN_ROUTE, actor=self.provider_user)
+        session = self.assignment.location_sessions.get()
+        self.assertIsNotNone(session.started_at)
+        self.assertIsNone(session.ended_at)
+        self.assertTrue(
+            AuditEvent.objects.filter(action="provider_location_session.opened", object_id=session.pk).exists()
+        )
+
+    def test_arrived_closes_session_and_deletes_its_pings(self):
+        session = self._open_session()
+        record_location_snapshot(self.assignment, latitude=Decimal("35.79"), longitude=Decimal("-78.78"))
+        self.assertEqual(ProviderLocationSnapshot.objects.count(), 1)
+
+        update_assignment_status(self.assignment, HomeVisitAssignment.Status.ARRIVED, actor=self.provider_user)
+
+        session.refresh_from_db()
+        self.assertIsNotNone(session.ended_at)
+        self.assertEqual(session.end_reason, ProviderLocationSession.EndReason.ARRIVED)
+        self.assertEqual(ProviderLocationSnapshot.objects.count(), 0)
+        self.assertTrue(
+            AuditEvent.objects.filter(action="provider_location_session.closed", object_id=session.pk, metadata__endReason="arrived").exists()
+        )
+
+    def test_cancelled_from_en_route_closes_session_as_cancelled(self):
+        session = self._open_session()
+        update_assignment_status(self.assignment, HomeVisitAssignment.Status.CANCELLED, actor=self.provider_user)
+        session.refresh_from_db()
+        self.assertEqual(session.end_reason, ProviderLocationSession.EndReason.CANCELLED)
+
+    def test_cancelling_the_request_while_en_route_also_closes_the_session(self):
+        # cancel_request() bypasses update_assignment_status() entirely (it
+        # never touches HomeVisitAssignment.status) — this is the gap fix:
+        # staff can cancel a SCHEDULED-status request whose assignment is
+        # still EN_ROUTE (see CANCELLABLE_REQUEST_STATUSES), so cancel_request()
+        # has its own explicit close_location_session() call.
+        session = self._open_session()
+        record_location_snapshot(self.assignment, latitude=Decimal("35.79"), longitude=Decimal("-78.78"))
+        self.request.refresh_from_db()
+
+        cancel_request(self.request, actor=self.admin, reason="Patient unavailable")
+
+        session.refresh_from_db()
+        self.assertIsNotNone(session.ended_at)
+        self.assertEqual(session.end_reason, ProviderLocationSession.EndReason.CANCELLED)
+        self.assertEqual(ProviderLocationSnapshot.objects.count(), 0)
+
+    def test_close_location_session_is_a_no_op_when_nothing_is_open(self):
+        self._schedule()  # never went EN_ROUTE
+        result = close_location_session(self.assignment, end_reason=ProviderLocationSession.EndReason.CANCELLED, actor=self.admin)
+        self.assertIsNone(result)
+
+    # --- record_location_snapshot()'s two hard gates ----------------------
+
+    def test_record_location_snapshot_rejects_without_provider_opt_in(self):
+        self._schedule()
+        update_assignment_status(self.assignment, HomeVisitAssignment.Status.EN_ROUTE, actor=self.provider_user)
+        self.assertFalse(self.provider.location_sharing_enabled)
+        with self.assertRaises(ValidationError):
+            record_location_snapshot(self.assignment, latitude=Decimal("35.79"), longitude=Decimal("-78.78"))
+
+    def test_record_location_snapshot_rejects_without_an_open_session(self):
+        self._schedule()  # ACCEPTED -> SCHEDULED, never EN_ROUTE, so no session exists
+        self.provider.location_sharing_enabled = True
+        self.provider.save(update_fields=["location_sharing_enabled"])
+        with self.assertRaises(ValidationError):
+            record_location_snapshot(self.assignment, latitude=Decimal("35.79"), longitude=Decimal("-78.78"))
+
+    def test_record_location_snapshot_succeeds_when_opted_in_and_en_route(self):
+        session = self._open_session()
+        snapshot = record_location_snapshot(self.assignment, latitude=Decimal("35.79"), longitude=Decimal("-78.78"), accuracy_meters=15)
+        self.assertEqual(snapshot.session_id, session.pk)
+
+    def test_opening_a_second_session_never_happens_for_the_same_en_route_stretch(self):
+        # Two record_location_snapshot() calls during the same EN_ROUTE
+        # window must land in the same session, not open a new one each time.
+        session = self._open_session()
+        record_location_snapshot(self.assignment, latitude=Decimal("35.79"), longitude=Decimal("-78.78"))
+        record_location_snapshot(self.assignment, latitude=Decimal("35.80"), longitude=Decimal("-78.79"))
+        self.assertEqual(self.assignment.location_sessions.count(), 1)
+        self.assertEqual(session.pings.count(), 2)
+
+    # --- consent: turning sharing off stops an active session now --------
+
+    def test_turning_off_location_sharing_closes_an_active_session_immediately(self):
+        session = self._open_session()
+        record_location_snapshot(self.assignment, latitude=Decimal("35.79"), longitude=Decimal("-78.78"))
+
+        set_location_sharing(self.provider, False, actor=self.provider_user)
+
+        session.refresh_from_db()
+        self.assertEqual(session.end_reason, ProviderLocationSession.EndReason.STOPPED_BY_PROVIDER)
+        self.assertEqual(ProviderLocationSnapshot.objects.count(), 0)
+        # The visit workflow itself is untouched by a consent change —
+        # this is a privacy decision, not a travel-status change.
+        self.assignment.refresh_from_db()
+        self.assertEqual(self.assignment.status, HomeVisitAssignment.Status.EN_ROUTE)
+
+    def test_turning_on_location_sharing_does_not_open_a_session_by_itself(self):
+        # Opting in is necessary but not sufficient — a session only opens
+        # at the EN_ROUTE transition, never from the consent toggle alone.
+        self._schedule()
+        set_location_sharing(self.provider, True, actor=self.provider_user)
+        self.assertEqual(self.assignment.location_sessions.count(), 0)
+
+    # --- purge_location_snapshots: stale-session backstop -----------------
+
+    def test_purge_command_force_closes_a_stale_session_as_timed_out(self):
+        session = self._open_session()
+        record_location_snapshot(self.assignment, latitude=Decimal("35.79"), longitude=Decimal("-78.78"))
+        ProviderLocationSession.objects.filter(pk=session.pk).update(started_at=timezone.now() - timedelta(hours=6))
+
+        call_command("purge_location_snapshots")
+
+        session.refresh_from_db()
+        self.assertIsNotNone(session.ended_at)
+        self.assertEqual(session.end_reason, ProviderLocationSession.EndReason.TIMED_OUT)
+        self.assertEqual(ProviderLocationSnapshot.objects.count(), 0)
+
+    def test_purge_command_leaves_a_fresh_open_session_alone(self):
+        session = self._open_session()
+        call_command("purge_location_snapshots")
+        session.refresh_from_db()
+        self.assertIsNone(session.ended_at)
+
+    def test_purge_command_backstop_deletes_an_orphaned_old_ping_from_a_still_open_session(self):
+        # The session itself is fresh (not stale), but its ping is old —
+        # the ping-level backstop catches this independently of the
+        # session-level sweep, for a ping that somehow survived its
+        # session's own close (a bug, not the expected path).
+        session = self._open_session()
+        snapshot = record_location_snapshot(self.assignment, latitude=Decimal("35.79"), longitude=Decimal("-78.78"))
+        ProviderLocationSnapshot.objects.filter(pk=snapshot.pk).update(created_at=timezone.now() - timedelta(hours=2))
+
+        call_command("purge_location_snapshots")
+
+        self.assertEqual(ProviderLocationSnapshot.objects.count(), 0)
+        session.refresh_from_db()
+        self.assertIsNone(session.ended_at)  # session itself is still fresh, untouched
+
+    # --- estimate_assignment_arrival(): honest unless a real ping+provider exist
+
+    def test_arrival_estimate_unavailable_when_not_en_route(self):
+        self._schedule()  # SCHEDULED, not yet EN_ROUTE
+        result = estimate_assignment_arrival(self.assignment)
+        self.assertFalse(result.available)
+        self.assertIn("not currently en route", result.message)
+
+    def test_arrival_estimate_unavailable_with_no_ping_yet(self):
+        self._open_session()
+        result = estimate_assignment_arrival(self.assignment)
+        self.assertFalse(result.available)
+        self.assertIn("not available yet", result.message)
+
+    @patch("care.mobile_care.get_distance_service")
+    @patch("care.mobile_care.get_geocoding_service")
+    def test_arrival_estimate_uses_the_latest_ping_as_origin(self, mock_geocoding, mock_distance):
+        self._open_session()
+        first_ping = record_location_snapshot(self.assignment, latitude=Decimal("35.70"), longitude=Decimal("-78.70"))
+        latest_ping = record_location_snapshot(self.assignment, latitude=Decimal("35.75"), longitude=Decimal("-78.75"))
+        # Force a real ordering gap — two calls in the same test can otherwise
+        # land on the same auto_now_add microsecond and tie-break arbitrarily.
+        ProviderLocationSnapshot.objects.filter(pk=first_ping.pk).update(created_at=timezone.now() - timedelta(minutes=1))
+        ProviderLocationSnapshot.objects.filter(pk=latest_ping.pk).update(created_at=timezone.now())
+
+        geocoding_stub = mock_geocoding.return_value
+        geocoding_stub.geocode.return_value = mapping.GeocodeResult(
+            geocoded=True, coordinates=mapping.Coordinates(35.79, -78.78), formatted_address="1 Track St", message="",
+        )
+        distance_stub = mock_distance.return_value
+        distance_stub.estimate.return_value = mapping.DistanceResult(
+            available=True, distance_miles=3.2, estimated_drive_minutes=9, message="",
+        )
+
+        result = estimate_assignment_arrival(self.assignment)
+
+        self.assertTrue(result.available)
+        self.assertEqual(result.estimated_drive_minutes, 9)
+        distance_stub.estimate.assert_called_once_with(
+            origin=mapping.Coordinates(35.75, -78.75), destination=mapping.Coordinates(35.79, -78.78),
+        )
+
+    # --- patient portal exposure: derived minutes only, never coordinates -
+
+    def test_portal_shows_en_route_status_with_no_estimate_when_no_provider_connected(self):
+        self._open_session()
+        record_location_snapshot(self.assignment, latitude=Decimal("35.79"), longitude=Decimal("-78.78"))
+        portal_user = User.objects.create_user(
+            username="track-portal-patient", password="safe-test-password", organization=self.org, role=User.Role.PATIENT,
+        )
+        self.patient.portal_user = portal_user
+        self.patient.save(update_fields=["portal_user"])
+
+        self.client.force_login(portal_user)
+        response = self.client.get(reverse("api-portal-mobile-care-requests"))
+
+        self.assertEqual(response.status_code, 200)
+        entry = next(row for row in response.json()["requests"] if row["id"] == str(self.request.pk))
+        self.assertEqual(entry["providerTravelStatus"], "en_route")
+        self.assertIsNone(entry["estimatedMinutesAway"])  # honest — no distance provider connected today
+        self.assertNotIn("latitude", json.dumps(entry))
+        self.assertNotIn("35.79", json.dumps(entry))
+
+    @patch("care.mobile_care.get_distance_service")
+    @patch("care.mobile_care.get_geocoding_service")
+    def test_portal_shows_a_derived_minutes_estimate_with_a_connected_provider(self, mock_geocoding, mock_distance):
+        self._open_session()
+        record_location_snapshot(self.assignment, latitude=Decimal("35.79"), longitude=Decimal("-78.78"))
+        mock_geocoding.return_value.geocode.return_value = mapping.GeocodeResult(
+            geocoded=True, coordinates=mapping.Coordinates(35.80, -78.80), formatted_address="1 Track St", message="",
+        )
+        mock_distance.return_value.estimate.return_value = mapping.DistanceResult(
+            available=True, distance_miles=2.1, estimated_drive_minutes=6, message="",
+        )
+        portal_user = User.objects.create_user(
+            username="track-portal-patient-2", password="safe-test-password", organization=self.org, role=User.Role.PATIENT,
+        )
+        self.patient.portal_user = portal_user
+        self.patient.save(update_fields=["portal_user"])
+
+        self.client.force_login(portal_user)
+        response = self.client.get(reverse("api-portal-mobile-care-requests"))
+
+        entry = next(row for row in response.json()["requests"] if row["id"] == str(self.request.pk))
+        self.assertEqual(entry["estimatedMinutesAway"], 6)
+
+    # --- API endpoints ------------------------------------------------------
+
+    def test_api_record_location_endpoint_requires_opt_in(self):
+        self._schedule()
+        update_assignment_status(self.assignment, HomeVisitAssignment.Status.EN_ROUTE, actor=self.provider_user)
+        self.client.force_login(self.provider_user)
+        response = self.client.post(
+            reverse("api-mobile-care-assignment-location", kwargs={"assignment_id": str(self.assignment.pk)}),
+            data=json.dumps({"latitude": 35.79, "longitude": -78.78}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 409)
+
+    def test_api_record_location_endpoint_succeeds_when_opted_in_and_en_route(self):
+        self._open_session()
+        self.client.force_login(self.provider_user)
+        response = self.client.post(
+            reverse("api-mobile-care-assignment-location", kwargs={"assignment_id": str(self.assignment.pk)}),
+            data=json.dumps({"latitude": 35.79, "longitude": -78.78, "accuracyMeters": 12}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(ProviderLocationSnapshot.objects.count(), 1)
+
+    def test_api_location_sharing_toggle_is_scoped_to_the_calling_providers_own_profile(self):
+        other_org = Organization.objects.create(name="Other Track PT", slug="track-other-pt")
+        other_user = User.objects.create_user(
+            username="track-other-provider", password="safe-test-password", organization=other_org, role=User.Role.THERAPIST,
+        )
+        Provider.objects.create(organization=other_org, user=other_user, first_name="Other", last_name="Provider")
+
+        self.client.force_login(other_user)
+        response = self.client.post(
+            reverse("api-mobile-care-my-location-sharing"),
+            data=json.dumps({"enabled": True}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["locationSharingEnabled"])
+        # This provider's own profile changed — never self.provider's.
+        self.provider.refresh_from_db()
+        self.assertFalse(self.provider.location_sharing_enabled)
+
+
+class MobileCareBillingIntegrationTests(TestCase):
+    """Mobile Care <-> existing billing integration (care/mobile_care_billing.py).
+    No new payment or billing system: self-pay/insurance/package are three
+    outcomes of the same org-configured ServicePrice quote, and every
+    charge this module creates lands in the same Charge table clinic-visit
+    billing already uses — staff can still put it on a Superbill or Claim
+    through the existing flows. "Invoice" has no dedicated model in this
+    app; the closest artifacts (Charge/Superbill/Claim) are reused as-is."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Billing Integration PT", slug="billing-integration-pt")
+        self.admin = User.objects.create_user(
+            username="billing-admin", password="safe-test-password", organization=self.org, role=User.Role.ADMIN,
+        )
+        self.biller = User.objects.create_user(
+            username="billing-biller", password="safe-test-password", organization=self.org, role=User.Role.BILLER,
+        )
+        self.patient = Patient.objects.create(
+            organization=self.org, first_name="Billy", last_name="Ing", date_of_birth=date(1980, 2, 2),
+        )
+        self.visit_weekday = 0  # Monday
+        today = date.today()
+        days_ahead = (self.visit_weekday - today.weekday()) % 7 or 7
+        self.visit_date = today + timedelta(days=days_ahead)
+
+        self.provider_user = User.objects.create_user(
+            username="billing-provider", password="safe-test-password", organization=self.org, role=User.Role.THERAPIST,
+        )
+        self.provider = Provider.objects.create(organization=self.org, user=self.provider_user, first_name="Bill", last_name="Therapist")
+        UserLicense.objects.create(
+            user=self.provider_user, license_number="PT-BILL", issuing_state="NC",
+            expires_at=date.today() + timedelta(days=365), verification_status=UserLicense.VerificationStatus.VERIFIED,
+        )
+        service_area = ServiceArea.objects.create(
+            organization=self.org, provider=self.provider, name="Primary", is_active=True, primary_zip_code="27526",
+        )
+        ServiceAreaZipCode.objects.create(service_area=service_area, zip_code="27526")
+        HomeVisitAvailability.objects.create(
+            organization=self.org, provider=self.provider, availability_type=HomeVisitAvailability.AvailabilityType.AVAILABLE,
+            is_recurring=True, day_of_week=self.visit_weekday, start_time=time(8, 0), end_time=time(17, 0), is_active=True,
+        )
+
+        # The org's configured home-visit pricing — matches the example
+        # given: Home PT Initial Evaluation $175, Home PT Follow-Up $135,
+        # Optional Travel Fee $20.
+        self.eval_price = ServicePrice.objects.create(
+            organization=self.org, cpt_code="97161", label="Home PT Initial Evaluation", price=Decimal("175.00"),
+            home_visit_kind=Appointment.Kind.EVALUATION, deposit_amount=Decimal("25.00"),
+        )
+        self.follow_up_price = ServicePrice.objects.create(
+            organization=self.org, cpt_code="97110", label="Home PT Follow-Up", price=Decimal("135.00"),
+            home_visit_kind=Appointment.Kind.FOLLOW_UP,
+        )
+        self.travel_fee_price = ServicePrice.objects.create(
+            organization=self.org, cpt_code="99082", label="Optional Travel Fee", price=Decimal("20.00"),
+            is_home_visit_travel_fee=True,
+        )
+
+    def _create_and_complete_visit(self, *, requested_service=MobileCareRequest.RequestedService.EVALUATION, payment_method=MobileCareRequest.PaymentMethod.SELF_PAY):
+        entry = MobileCareRequest.objects.create(
+            organization=self.org, patient=self.patient,
+            address_line_1="1 Billing St", city="Cary", state="NC", zip_code="27526",
+            earliest_date=self.visit_date, requested_service=requested_service, payment_method=payment_method,
+        )
+        match = generate_matches(entry, actor=self.admin)[0]
+        offer_match(match, actor=self.admin)
+        _, assignment = respond_to_match(match, accept=True, actor=self.provider_user)
+        starts_at = timezone.make_aware(datetime.combine(self.visit_date, time(9, 0)))
+        appointment = schedule_assignment(
+            assignment, starts_at=starts_at, ends_at=starts_at + timedelta(minutes=45), kind=requested_service, actor=self.provider_user,
+        )
+        appointment.status = Appointment.Status.COMPLETED
+        appointment.save(update_fields=["status"])
+        entry.refresh_from_db()
+        return entry, appointment
+
+    # --- ServicePrice's new home-visit tags: validation & constraints ----
+
+    def test_deposit_only_allowed_on_a_home_visit_kind_row(self):
+        price = ServicePrice(
+            organization=self.org, cpt_code="97112", label="Bad Deposit", price=Decimal("50.00"),
+            is_home_visit_travel_fee=True, deposit_amount=Decimal("10.00"),
+        )
+        with self.assertRaises(ValidationError):
+            price.full_clean()
+
+    def test_a_row_cannot_be_both_a_kind_and_the_travel_fee(self):
+        price = ServicePrice(
+            organization=self.org, cpt_code="97113", label="Both Tags", price=Decimal("50.00"),
+            home_visit_kind=Appointment.Kind.PROGRESS, is_home_visit_travel_fee=True,
+        )
+        with self.assertRaises(ValidationError):
+            price.full_clean()
+
+    def test_only_one_price_per_home_visit_kind_per_org(self):
+        duplicate = ServicePrice(
+            organization=self.org, cpt_code="97162", label="Duplicate Eval Price", price=Decimal("200.00"),
+            home_visit_kind=Appointment.Kind.EVALUATION,
+        )
+        with self.assertRaises(ValidationError):
+            duplicate.full_clean()
+
+    def test_only_one_travel_fee_per_org(self):
+        duplicate = ServicePrice(
+            organization=self.org, cpt_code="99083", label="Second Travel Fee", price=Decimal("30.00"),
+            is_home_visit_travel_fee=True,
+        )
+        with self.assertRaises(ValidationError):
+            duplicate.full_clean()
+
+    # --- home_visit_price_quote() -----------------------------------------
+
+    def test_quote_reports_unconfigured_for_an_untagged_kind(self):
+        quote = home_visit_price_quote(self.org, Appointment.Kind.DISCHARGE)
+        self.assertFalse(quote.configured)
+        self.assertIsNone(quote.service_price)
+        self.assertIsNotNone(quote.travel_fee_price)  # travel fee is org-wide, not per-kind
+
+    def test_quote_finds_the_tagged_price_for_a_configured_kind(self):
+        quote = home_visit_price_quote(self.org, Appointment.Kind.FOLLOW_UP)
+        self.assertTrue(quote.configured)
+        self.assertEqual(quote.service_price.pk, self.follow_up_price.pk)
+
+    # --- estimate_home_visit_charges() -------------------------------------
+
+    def test_self_pay_estimate_includes_travel_fee_and_full_responsibility(self):
+        entry = MobileCareRequest.objects.create(
+            organization=self.org, patient=self.patient, address_line_1="1 Billing St", city="Cary", state="NC", zip_code="27526",
+            earliest_date=self.visit_date, requested_service=MobileCareRequest.RequestedService.EVALUATION,
+            payment_method=MobileCareRequest.PaymentMethod.SELF_PAY,
+        )
+        estimate = estimate_home_visit_charges(entry)
+        self.assertTrue(estimate.pricing_configured)
+        self.assertEqual(estimate.service_price_amount, Decimal("175.00"))
+        self.assertEqual(estimate.travel_fee_amount, Decimal("20.00"))
+        self.assertEqual(estimate.total_charge_amount, Decimal("195.00"))
+        self.assertEqual(estimate.patient_responsibility, Decimal("195.00"))
+        self.assertEqual(estimate.deposit_amount, Decimal("25.00"))
+        self.assertFalse(estimate.package_applied)
+
+    def test_estimate_can_exclude_the_travel_fee(self):
+        entry = MobileCareRequest.objects.create(
+            organization=self.org, patient=self.patient, address_line_1="1 Billing St", city="Cary", state="NC", zip_code="27526",
+            earliest_date=self.visit_date, requested_service=MobileCareRequest.RequestedService.FOLLOW_UP,
+        )
+        estimate = estimate_home_visit_charges(entry, include_travel_fee=False)
+        self.assertIsNone(estimate.travel_fee_amount)
+        self.assertEqual(estimate.total_charge_amount, Decimal("135.00"))
+
+    def test_insurance_estimate_uses_known_copay(self):
+        payer = Payer.objects.create(organization=self.org, name="Test Payer")
+        PatientInsurance.objects.create(
+            organization=self.org, patient=self.patient, payer=payer, member_id="M123",
+            effective_date=date.today() - timedelta(days=30), copay=Decimal("30.00"),
+        )
+        entry = MobileCareRequest.objects.create(
+            organization=self.org, patient=self.patient, address_line_1="1 Billing St", city="Cary", state="NC", zip_code="27526",
+            earliest_date=self.visit_date, requested_service=MobileCareRequest.RequestedService.FOLLOW_UP,
+            payment_method=MobileCareRequest.PaymentMethod.INSURANCE,
+        )
+        estimate = estimate_home_visit_charges(entry)
+        self.assertEqual(estimate.copay_amount, Decimal("30.00"))
+        self.assertEqual(estimate.patient_responsibility, Decimal("30.00"))
+
+    def test_insurance_estimate_without_a_copay_on_file_shows_full_charge(self):
+        # No PatientInsurance at all — never a fabricated coinsurance/
+        # deductible guess, so this honestly falls back to the full amount.
+        entry = MobileCareRequest.objects.create(
+            organization=self.org, patient=self.patient, address_line_1="1 Billing St", city="Cary", state="NC", zip_code="27526",
+            earliest_date=self.visit_date, requested_service=MobileCareRequest.RequestedService.FOLLOW_UP,
+            payment_method=MobileCareRequest.PaymentMethod.INSURANCE,
+        )
+        estimate = estimate_home_visit_charges(entry)
+        self.assertIsNone(estimate.copay_amount)
+        self.assertEqual(estimate.patient_responsibility, estimate.total_charge_amount)
+
+    def test_package_coverage_zeroes_out_patient_responsibility(self):
+        package = CashPackage.objects.create(
+            organization=self.org, patient=self.patient, kind=CashPackage.Kind.MEMBERSHIP, name="Unlimited Home Visits",
+            price=Decimal("500.00"), status=CashPackage.Status.ACTIVE,
+        )
+        entry = MobileCareRequest.objects.create(
+            organization=self.org, patient=self.patient, address_line_1="1 Billing St", city="Cary", state="NC", zip_code="27526",
+            earliest_date=self.visit_date, requested_service=MobileCareRequest.RequestedService.FOLLOW_UP,
+            payment_method=MobileCareRequest.PaymentMethod.PACKAGE,
+        )
+        estimate = estimate_home_visit_charges(entry)
+        self.assertTrue(estimate.package_applied)
+        self.assertEqual(estimate.package_name, package.name)
+        self.assertEqual(estimate.patient_responsibility, Decimal("0.00"))
+
+    def test_package_payment_method_without_an_active_package_does_not_apply(self):
+        entry = MobileCareRequest.objects.create(
+            organization=self.org, patient=self.patient, address_line_1="1 Billing St", city="Cary", state="NC", zip_code="27526",
+            earliest_date=self.visit_date, requested_service=MobileCareRequest.RequestedService.FOLLOW_UP,
+            payment_method=MobileCareRequest.PaymentMethod.PACKAGE,
+        )
+        estimate = estimate_home_visit_charges(entry)
+        self.assertFalse(estimate.package_applied)
+        self.assertEqual(estimate.patient_responsibility, estimate.total_charge_amount)
+
+    def test_estimate_is_honest_when_pricing_is_not_configured(self):
+        entry = MobileCareRequest.objects.create(
+            organization=self.org, patient=self.patient, address_line_1="1 Billing St", city="Cary", state="NC", zip_code="27526",
+            earliest_date=self.visit_date, requested_service=MobileCareRequest.RequestedService.DISCHARGE,
+        )
+        estimate = estimate_home_visit_charges(entry)
+        self.assertFalse(estimate.pricing_configured)
+        self.assertIsNone(estimate.patient_responsibility)
+
+    # --- create_home_visit_service_charge() --------------------------------
+
+    def test_create_service_charge_uses_the_configured_price(self):
+        entry, appointment = self._create_and_complete_visit(requested_service=MobileCareRequest.RequestedService.FOLLOW_UP)
+        charge = create_home_visit_service_charge(appointment, actor=self.admin)
+        self.assertEqual(charge.cpt_code, "97110")
+        self.assertEqual(charge.charge_amount, Decimal("135.00"))
+        self.assertEqual(charge.patient_id, self.patient.pk)
+        self.assertTrue(AuditEvent.objects.filter(action="charge.created", object_id=charge.pk).exists())
+
+    def test_create_service_charge_requires_a_completed_visit(self):
+        entry, appointment = self._create_and_complete_visit()
+        appointment.status = Appointment.Status.SCHEDULED
+        appointment.save(update_fields=["status"])
+        with self.assertRaises(ValidationError):
+            create_home_visit_service_charge(appointment, actor=self.admin)
+
+    def test_create_service_charge_requires_configured_pricing(self):
+        entry, appointment = self._create_and_complete_visit(requested_service=MobileCareRequest.RequestedService.DISCHARGE)
+        with self.assertRaises(ValidationError):
+            create_home_visit_service_charge(appointment, actor=self.admin)
+
+    def test_create_service_charge_rejects_a_duplicate(self):
+        entry, appointment = self._create_and_complete_visit(requested_service=MobileCareRequest.RequestedService.FOLLOW_UP)
+        create_home_visit_service_charge(appointment, actor=self.admin)
+        with self.assertRaises(ValidationError):
+            create_home_visit_service_charge(appointment, actor=self.admin)
+
+    # --- add_travel_charge() -----------------------------------------------
+
+    def test_travel_charge_uses_the_configured_default_when_not_overridden(self):
+        entry, appointment = self._create_and_complete_visit()
+        charge = add_travel_charge(appointment, created_by=self.admin)
+        self.assertEqual(charge.cpt_code, "99082")
+        self.assertEqual(charge.charge_amount, Decimal("20.00"))
+
+    def test_travel_charge_override_still_works(self):
+        entry, appointment = self._create_and_complete_visit()
+        charge = add_travel_charge(appointment, cpt_code="99999", charge_amount=Decimal("35.00"), created_by=self.admin)
+        self.assertEqual(charge.cpt_code, "99999")
+        self.assertEqual(charge.charge_amount, Decimal("35.00"))
+
+    def test_travel_charge_raises_with_no_override_and_no_configuration(self):
+        self.travel_fee_price.is_active = False
+        self.travel_fee_price.save(update_fields=["is_active"])
+        entry, appointment = self._create_and_complete_visit()
+        with self.assertRaises(ValidationError):
+            add_travel_charge(appointment, created_by=self.admin)
+
+    # --- API: billing estimate / add service charge / add travel charge ---
+
+    def test_billing_estimate_endpoint_returns_the_breakdown(self):
+        entry, _appointment = self._create_and_complete_visit(requested_service=MobileCareRequest.RequestedService.FOLLOW_UP)
+        self.client.force_login(self.biller)
+        response = self.client.get(reverse("api-mobile-care-request-billing-estimate", kwargs={"request_id": str(entry.pk)}))
+        self.assertEqual(response.status_code, 200)
+        estimate = response.json()["estimate"]
+        self.assertEqual(estimate["servicePriceAmount"], "135.00")
+        self.assertEqual(estimate["travelFeeAmount"], "20.00")
+        self.assertEqual(estimate["patientResponsibility"], "155.00")
+
+    def test_billing_estimate_endpoint_requires_a_billing_role(self):
+        entry, _appointment = self._create_and_complete_visit()
+        self.client.force_login(self.provider_user)  # therapist — not in BILLING_ROLES
+        response = self.client.get(reverse("api-mobile-care-request-billing-estimate", kwargs={"request_id": str(entry.pk)}))
+        self.assertEqual(response.status_code, 403)
+
+    def test_billing_estimate_endpoint_is_tenant_scoped(self):
+        entry, _appointment = self._create_and_complete_visit()
+        other_org = Organization.objects.create(name="Other Billing PT", slug="other-billing-pt")
+        other_biller = User.objects.create_user(
+            username="other-billing-biller", password="safe-test-password", organization=other_org, role=User.Role.BILLER,
+        )
+        self.client.force_login(other_biller)
+        response = self.client.get(reverse("api-mobile-care-request-billing-estimate", kwargs={"request_id": str(entry.pk)}))
+        self.assertEqual(response.status_code, 404)
+
+    def test_add_service_charge_endpoint_creates_a_charge(self):
+        entry, _appointment = self._create_and_complete_visit(requested_service=MobileCareRequest.RequestedService.EVALUATION)
+        self.client.force_login(self.biller)
+        response = self.client.post(reverse("api-mobile-care-request-add-service-charge", kwargs={"request_id": str(entry.pk)}))
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["charge"]["chargeAmount"], "175.00")
+        self.assertEqual(Charge.objects.filter(patient=self.patient).count(), 1)
+
+    def test_add_service_charge_endpoint_requires_a_scheduled_request(self):
+        entry = MobileCareRequest.objects.create(
+            organization=self.org, patient=self.patient, address_line_1="1 Billing St", city="Cary", state="NC", zip_code="27526",
+            earliest_date=self.visit_date,
+        )
+        self.client.force_login(self.biller)
+        response = self.client.post(reverse("api-mobile-care-request-add-service-charge", kwargs={"request_id": str(entry.pk)}))
+        self.assertEqual(response.status_code, 409)
+
+    def test_add_travel_charge_endpoint_defaults_to_configured_fee(self):
+        entry, _appointment = self._create_and_complete_visit()
+        self.client.force_login(self.biller)
+        response = self.client.post(
+            reverse("api-mobile-care-request-add-travel-charge", kwargs={"request_id": str(entry.pk)}),
+            data=json.dumps({}), content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["charge"]["chargeAmount"], "20.00")
+
+    def test_add_travel_charge_endpoint_rejects_a_blank_override(self):
+        entry, _appointment = self._create_and_complete_visit()
+        self.client.force_login(self.biller)
+        response = self.client.post(
+            reverse("api-mobile-care-request-add-travel-charge", kwargs={"request_id": str(entry.pk)}),
+            data=json.dumps({"cptCode": "   "}), content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 422)
+
+    # --- Patient portal: billing estimate exposure + payment linking ------
+
+    def test_portal_request_list_includes_billing_estimate_by_default(self):
+        # No OrganizationSubscription at all — unrestricted, matching every
+        # other feature-gated Mobile Care test in this file.
+        entry, _appointment = self._create_and_complete_visit(requested_service=MobileCareRequest.RequestedService.FOLLOW_UP)
+        portal_user = User.objects.create_user(
+            username="billing-portal-patient", password="safe-test-password", organization=self.org, role=User.Role.PATIENT,
+        )
+        self.patient.portal_user = portal_user
+        self.patient.save(update_fields=["portal_user"])
+        self.client.force_login(portal_user)
+
+        response = self.client.get(reverse("api-portal-mobile-care-requests"))
+        row = next(item for item in response.json()["requests"] if item["id"] == str(entry.pk))
+        self.assertIsNotNone(row["billingEstimate"])
+        self.assertEqual(row["billingEstimate"]["servicePriceAmount"], "135.00")
+
+    def test_portal_billing_estimate_absent_when_billing_feature_disabled(self):
+        other_feature = Feature.objects.create(code="mobile_care", name="Mobile Care")
+        plan = SubscriptionPlan.objects.create(code="billing-int-plan", name="Plan Without Billing", provider_seat_limit=10)
+        plan.features.add(other_feature)
+        subscription = OrganizationSubscription.objects.create(
+            organization=self.org, plan=plan, status=OrganizationSubscription.Status.ACTIVE,
+        )
+        subscription.features.add(other_feature)  # billing deliberately NOT granted
+        entry, _appointment = self._create_and_complete_visit(requested_service=MobileCareRequest.RequestedService.FOLLOW_UP)
+        portal_user = User.objects.create_user(
+            username="billing-portal-patient-2", password="safe-test-password", organization=self.org, role=User.Role.PATIENT,
+        )
+        self.patient.portal_user = portal_user
+        self.patient.save(update_fields=["portal_user"])
+        self.client.force_login(portal_user)
+
+        response = self.client.get(reverse("api-portal-mobile-care-requests"))
+        row = next(item for item in response.json()["requests"] if item["id"] == str(entry.pk))
+        self.assertIsNone(row["billingEstimate"])
+
+    def test_portal_payment_links_to_its_mobile_care_request(self):
+        entry, _appointment = self._create_and_complete_visit()
+        portal_user = User.objects.create_user(
+            username="billing-portal-patient-3", password="safe-test-password", organization=self.org, role=User.Role.PATIENT,
+        )
+        self.patient.portal_user = portal_user
+        self.patient.save(update_fields=["portal_user"])
+        self.client.force_login(portal_user)
+
+        response = self.client.post(
+            reverse("api-portal-payment-charge"),
+            data=json.dumps({"amount": "25.00", "mobileCareRequestId": str(entry.pk)}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["payment"]["mobileCareRequestId"], str(entry.pk))
+        payment = PatientPayment.objects.get(pk=response.json()["payment"]["id"])
+        self.assertEqual(payment.mobile_care_request_id, entry.pk)
+
+    def test_portal_payment_rejects_another_patients_request(self):
+        entry, _appointment = self._create_and_complete_visit()
+        other_patient = Patient.objects.create(
+            organization=self.org, first_name="Other", last_name="Patient", date_of_birth=date(1975, 1, 1),
+        )
+        other_portal_user = User.objects.create_user(
+            username="billing-portal-patient-4", password="safe-test-password", organization=self.org, role=User.Role.PATIENT,
+        )
+        other_patient.portal_user = other_portal_user
+        other_patient.save(update_fields=["portal_user"])
+        self.client.force_login(other_portal_user)
+
+        response = self.client.post(
+            reverse("api-portal-payment-charge"),
+            data=json.dumps({"amount": "25.00", "mobileCareRequestId": str(entry.pk)}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 404)
+        self.assertFalse(PatientPayment.objects.filter(patient=other_patient).exists())
+
+    def test_patient_payment_model_rejects_a_cross_patient_request_link(self):
+        entry, _appointment = self._create_and_complete_visit()
+        other_patient = Patient.objects.create(
+            organization=self.org, first_name="Cross", last_name="Patient", date_of_birth=date(1975, 1, 1),
+        )
+        payment = PatientPayment(patient=other_patient, amount=Decimal("25.00"), mobile_care_request=entry)
+        with self.assertRaises(ValidationError):
+            payment.full_clean()
+
+
+class MobileCareConfigurationTests(TestCase):
+    """Mobile Care configuration under Administration — organization-scoped
+    settings (MobileCareConfiguration) an Organization Admin manages for
+    their own tenant, layered over platform-wide defaults
+    (MobileCarePlatformDefaults) a Super Admin manages. Service Areas and
+    Self-Pay Pricing/the Travel Fee keep their own existing endpoints, so
+    this covers everything else: enable switch, visit duration, available
+    services, provider types, matching settings, travel radius, offer
+    expiration, cancellation windows/rules, service hours, and
+    notification settings — plus that every change is audited."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Config PT", slug="config-pt")
+        self.other_org = Organization.objects.create(name="Other Config PT", slug="other-config-pt")
+        self.admin = User.objects.create_user(
+            username="config-admin", password="safe-test-password", organization=self.org, role=User.Role.ADMIN,
+        )
+        self.patient = Patient.objects.create(
+            organization=self.org, first_name="Connie", last_name="Fig", date_of_birth=date(1985, 6, 6),
+            email="connie@example.com",
+        )
+        self.visit_weekday = 0  # Monday
+        today = date.today()
+        days_ahead = (self.visit_weekday - today.weekday()) % 7 or 7
+        self.visit_date = today + timedelta(days=days_ahead)
+
+        self.provider_user = User.objects.create_user(
+            username="config-provider", password="safe-test-password", organization=self.org, role=User.Role.THERAPIST,
+        )
+        self.provider = Provider.objects.create(organization=self.org, user=self.provider_user, first_name="Con", last_name="Therapist")
+        UserLicense.objects.create(
+            user=self.provider_user, license_number="PT-CONFIG", issuing_state="NC",
+            expires_at=date.today() + timedelta(days=365), verification_status=UserLicense.VerificationStatus.VERIFIED,
+        )
+        service_area = ServiceArea.objects.create(
+            organization=self.org, provider=self.provider, name="Primary", is_active=True, primary_zip_code="27526",
+        )
+        ServiceAreaZipCode.objects.create(service_area=service_area, zip_code="27526")
+        HomeVisitAvailability.objects.create(
+            organization=self.org, provider=self.provider, availability_type=HomeVisitAvailability.AvailabilityType.AVAILABLE,
+            is_recurring=True, day_of_week=self.visit_weekday, start_time=time(8, 0), end_time=time(17, 0), is_active=True,
+        )
+
+    def _matched_assignment(self, **request_kwargs):
+        entry = MobileCareRequest.objects.create(
+            organization=self.org, patient=self.patient,
+            address_line_1="1 Config St", city="Cary", state="NC", zip_code="27526",
+            earliest_date=self.visit_date, **request_kwargs,
+        )
+        match = generate_matches(entry, actor=self.admin)[0]
+        offer_match(match, actor=self.admin)
+        _, assignment = respond_to_match(match, accept=True, actor=self.provider_user)
+        return entry, assignment
+
+    # --- get_configuration() / get_platform_defaults(): singletons --------
+
+    def test_get_configuration_is_get_or_create_and_stable(self):
+        first = get_configuration(self.org)
+        second = get_configuration(self.org)
+        self.assertEqual(first.pk, second.pk)
+
+    def test_get_platform_defaults_is_a_single_row(self):
+        first = get_platform_defaults()
+        second = get_platform_defaults()
+        self.assertEqual(first.pk, second.pk)
+        self.assertEqual(MobileCarePlatformDefaults.objects.count(), 1)
+
+    # --- Enable Mobile Care: opt-in defaults True, layered on entitlement -
+
+    def test_mobile_care_enabled_by_default_with_no_subscription(self):
+        self.assertTrue(is_mobile_care_enabled(self.org))
+
+    def test_org_admin_can_turn_mobile_care_off(self):
+        update_configuration(self.org, {"mobile_care_enabled": False}, actor=self.admin)
+        self.assertFalse(is_mobile_care_enabled(self.org))
+
+    def test_mobile_care_enabled_still_requires_the_subscription_feature(self):
+        # Turning the org's own switch back on doesn't override a
+        # subscription that plainly doesn't grant the feature.
+        other_feature = Feature.objects.create(code="billing", name="Billing")
+        plan = SubscriptionPlan.objects.create(code="config-plan", name="No Mobile Care Plan", provider_seat_limit=5)
+        plan.features.add(other_feature)
+        subscription = OrganizationSubscription.objects.create(
+            organization=self.org, plan=plan, status=OrganizationSubscription.Status.ACTIVE,
+        )
+        subscription.features.add(other_feature)
+        self.assertFalse(is_mobile_care_enabled(self.org))
+
+    # --- effective_*() fallback chain: org override, else platform default
+
+    def test_effective_readers_fall_back_to_platform_defaults(self):
+        self.assertEqual(effective_default_visit_duration_minutes(self.org), get_platform_defaults().default_visit_duration_minutes)
+        self.assertEqual(effective_offer_expiration_hours(self.org), get_platform_defaults().offer_expiration_hours)
+        self.assertEqual(effective_max_travel_radius_miles(self.org), get_platform_defaults().max_travel_radius_miles)
+        self.assertEqual(effective_continuity_preferred(self.org), get_platform_defaults().same_provider_continuity_preferred)
+
+    def test_effective_readers_use_the_org_override_once_set(self):
+        update_configuration(
+            self.org,
+            {"default_visit_duration_minutes": 90, "offer_expiration_hours": 1, "max_travel_radius_miles": 10, "same_provider_continuity_preferred": False},
+            actor=self.admin,
+        )
+        self.assertEqual(effective_default_visit_duration_minutes(self.org), 90)
+        self.assertEqual(effective_offer_expiration_hours(self.org), 1)
+        self.assertEqual(effective_max_travel_radius_miles(self.org), 10)
+        self.assertFalse(effective_continuity_preferred(self.org))
+
+    def test_changing_the_platform_default_does_not_touch_an_org_override(self):
+        update_configuration(self.org, {"offer_expiration_hours": 1}, actor=self.admin)
+        super_admin = User(username="config-super-admin", role=User.Role.SUPER_ADMIN, is_superuser=True)
+        super_admin.set_password("safe-test-password")
+        super_admin.full_clean()
+        super_admin.save()
+        update_platform_defaults({"offer_expiration_hours": 12}, actor=super_admin)
+        self.assertEqual(effective_offer_expiration_hours(self.org), 1)
+
+    def test_effective_match_weights_merges_overrides_and_honors_continuity_toggle(self):
+        update_configuration(self.org, {"match_weight_overrides": {"specialty": 99.0}}, actor=self.admin)
+        weights = effective_match_weights(self.org)
+        self.assertEqual(weights["specialty"], 99.0)
+        self.assertGreater(weights["continuity"], 0)  # untouched dimension keeps its default
+
+        update_configuration(self.org, {"same_provider_continuity_preferred": False}, actor=self.admin)
+        self.assertEqual(effective_match_weights(self.org)["continuity"], 0.0)
+
+    # --- update_configuration()/update_platform_defaults(): audit trail ---
+
+    def test_update_configuration_audits_only_changed_fields(self):
+        update_configuration(self.org, {"default_visit_duration_minutes": 60, "max_travel_radius_miles": None}, actor=self.admin)
+        event = AuditEvent.objects.get(action="mobile_care_configuration.updated", organization=self.org)
+        self.assertIn("default_visit_duration_minutes", event.metadata["changed"])
+        self.assertNotIn("max_travel_radius_miles", event.metadata["changed"])  # unchanged (already None)
+
+    def test_update_configuration_is_a_no_op_when_nothing_changes(self):
+        update_configuration(self.org, {"mobile_care_enabled": True}, actor=self.admin)  # already the default
+        self.assertFalse(AuditEvent.objects.filter(action="mobile_care_configuration.updated").exists())
+
+    def test_update_platform_defaults_records_an_organization_less_audit_event(self):
+        super_admin = User(username="config-super-admin-2", role=User.Role.SUPER_ADMIN, is_superuser=True)
+        super_admin.set_password("safe-test-password")
+        super_admin.full_clean()
+        super_admin.save()
+        update_platform_defaults({"max_travel_radius_miles": 40}, actor=super_admin)
+        event = AuditEvent.objects.get(action="mobile_care_platform_defaults.updated")
+        self.assertIsNone(event.organization_id)
+        self.assertEqual(event.metadata["changed"]["max_travel_radius_miles"]["new"], 40)
+
+    # --- MobileCareConfiguration.clean() -----------------------------------
+
+    def test_configuration_rejects_service_hours_end_before_start(self):
+        config = get_configuration(self.org)
+        config.service_hours_start = time(17, 0)
+        config.service_hours_end = time(9, 0)
+        with self.assertRaises(ValidationError):
+            config.full_clean()
+
+    def test_configuration_rejects_an_unrecognized_available_service(self):
+        config = get_configuration(self.org)
+        config.available_services = ["not_a_real_service"]
+        with self.assertRaises(ValidationError):
+            config.full_clean()
+
+    def test_configuration_rejects_an_unrecognized_provider_role(self):
+        config = get_configuration(self.org)
+        config.allowed_provider_roles = ["biller"]
+        with self.assertRaises(ValidationError):
+            config.full_clean()
+
+    def test_configuration_rejects_an_unrecognized_match_weight_dimension(self):
+        config = get_configuration(self.org)
+        config.match_weight_overrides = {"not_a_dimension": 10.0}
+        with self.assertRaises(ValidationError):
+            config.full_clean()
+
+    # --- Available Services: create_request()/update_request() gate ------
+
+    def test_create_request_rejects_an_unavailable_service(self):
+        update_configuration(self.org, {"available_services": ["follow_up"]}, actor=self.admin)
+        with self.assertRaises(ValidationError):
+            create_request(
+                self.patient, source=MobileCareRequest.Source.FRONT_DESK,
+                address_line_1="1 Config St", city="Cary", state="NC", zip_code="27526",
+                earliest_date=self.visit_date, requested_service=MobileCareRequest.RequestedService.EVALUATION,
+                created_by=self.admin,
+            )
+
+    def test_create_request_allows_an_available_service(self):
+        update_configuration(self.org, {"available_services": ["follow_up"]}, actor=self.admin)
+        entry = create_request(
+            self.patient, source=MobileCareRequest.Source.FRONT_DESK,
+            address_line_1="1 Config St", city="Cary", state="NC", zip_code="27526",
+            earliest_date=self.visit_date, requested_service=MobileCareRequest.RequestedService.FOLLOW_UP,
+            created_by=self.admin,
+        )
+        self.assertEqual(entry.requested_service, MobileCareRequest.RequestedService.FOLLOW_UP)
+
+    def test_no_available_services_configured_means_no_restriction(self):
+        entry = create_request(
+            self.patient, source=MobileCareRequest.Source.FRONT_DESK,
+            address_line_1="1 Config St", city="Cary", state="NC", zip_code="27526",
+            earliest_date=self.visit_date, requested_service=MobileCareRequest.RequestedService.DISCHARGE,
+            created_by=self.admin,
+        )
+        self.assertEqual(entry.requested_service, MobileCareRequest.RequestedService.DISCHARGE)
+
+    # --- Provider Types: check_provider_eligibility() gate ---------------
+
+    def test_restricting_provider_types_excludes_a_disallowed_role(self):
+        update_configuration(self.org, {"allowed_provider_roles": ["therapist"]}, actor=self.admin)
+        assistant_user = User.objects.create_user(
+            username="config-assistant", password="safe-test-password", organization=self.org, role=User.Role.ASSISTANT,
+        )
+        assistant = Provider.objects.create(organization=self.org, user=assistant_user, first_name="Ann", last_name="Assist")
+        probe = MobileCareRequest(organization=self.org, zip_code="27526", state="NC", earliest_date=self.visit_date)
+        result = check_provider_eligibility(assistant, probe)
+        self.assertFalse(result.eligible)
+        self.assertIn(EligibilityReason.PROVIDER_TYPE_NOT_PERMITTED, result.reasons)
+
+    def test_no_provider_role_restriction_by_default(self):
+        probe = MobileCareRequest(organization=self.org, zip_code="27526", state="NC", earliest_date=self.visit_date)
+        self.assertTrue(check_provider_eligibility(self.provider, probe).eligible)
+
+    # --- Offer Expiration Time ----------------------------------------------
+
+    def test_offer_match_uses_the_configured_expiration_when_not_overridden(self):
+        update_configuration(self.org, {"offer_expiration_hours": 1}, actor=self.admin)
+        entry, _assignment = self._matched_assignment()
+        # respond_to_match() already accepted the first match in
+        # _matched_assignment(); generate a second, independent offer to
+        # inspect expires_at directly without disturbing that acceptance.
+        entry2 = MobileCareRequest.objects.create(
+            organization=self.org, patient=self.patient, address_line_1="2 Config St", city="Cary", state="NC",
+            zip_code="27526", earliest_date=self.visit_date,
+        )
+        match = generate_matches(entry2, actor=self.admin)[0]
+        offer_match(match, actor=self.admin)
+        match.refresh_from_db()
+        delta_hours = (match.expires_at - match.offered_at).total_seconds() / 3600
+        self.assertAlmostEqual(delta_hours, 1, places=2)
+
+    def test_offer_match_explicit_override_still_wins(self):
+        update_configuration(self.org, {"offer_expiration_hours": 1}, actor=self.admin)
+        entry = MobileCareRequest.objects.create(
+            organization=self.org, patient=self.patient, address_line_1="3 Config St", city="Cary", state="NC",
+            zip_code="27526", earliest_date=self.visit_date,
+        )
+        match = generate_matches(entry, actor=self.admin)[0]
+        offer_match(match, actor=self.admin, expires_in_hours=10)
+        match.refresh_from_db()
+        delta_hours = (match.expires_at - match.offered_at).total_seconds() / 3600
+        self.assertAlmostEqual(delta_hours, 10, places=2)
+
+    # --- Maximum Travel Radius: ServiceArea ceiling ------------------------
+
+    def test_service_area_radius_cannot_exceed_the_configured_maximum(self):
+        update_configuration(self.org, {"max_travel_radius_miles": 10}, actor=self.admin)
+        area = ServiceArea(organization=self.org, provider=self.provider, name="Too Far", radius_miles=15)
+        with self.assertRaises(ValidationError):
+            area.full_clean()
+
+    def test_service_area_radius_within_the_configured_maximum_is_fine(self):
+        update_configuration(self.org, {"max_travel_radius_miles": 10}, actor=self.admin)
+        area = ServiceArea(organization=self.org, provider=self.provider, name="Close Enough", radius_miles=5)
+        area.full_clean()  # does not raise
+
+    # --- Service Hours: schedule_assignment()/schedule_appointment() ------
+
+    def test_schedule_assignment_rejects_a_visit_starting_before_service_hours(self):
+        update_configuration(self.org, {"service_hours_start": time(9, 0), "service_hours_end": time(17, 0)}, actor=self.admin)
+        entry, assignment = self._matched_assignment()
+        starts_at = timezone.make_aware(datetime.combine(self.visit_date, time(7, 0)))
+        with self.assertRaises(ValidationError):
+            schedule_assignment(assignment, starts_at=starts_at, ends_at=starts_at + timedelta(minutes=45), kind="follow_up", actor=self.provider_user)
+
+    def test_schedule_assignment_rejects_a_visit_ending_after_service_hours(self):
+        update_configuration(self.org, {"service_hours_start": time(9, 0), "service_hours_end": time(17, 0)}, actor=self.admin)
+        entry, assignment = self._matched_assignment()
+        starts_at = timezone.make_aware(datetime.combine(self.visit_date, time(16, 45)))
+        with self.assertRaises(ValidationError):
+            schedule_assignment(assignment, starts_at=starts_at, ends_at=starts_at + timedelta(minutes=45), kind="follow_up", actor=self.provider_user)
+
+    def test_schedule_assignment_allows_a_visit_within_service_hours(self):
+        update_configuration(self.org, {"service_hours_start": time(9, 0), "service_hours_end": time(17, 0)}, actor=self.admin)
+        entry, assignment = self._matched_assignment()
+        starts_at = timezone.make_aware(datetime.combine(self.visit_date, time(10, 0)))
+        appointment = schedule_assignment(assignment, starts_at=starts_at, ends_at=starts_at + timedelta(minutes=45), kind="follow_up", actor=self.provider_user)
+        self.assertIsNotNone(appointment.pk)
+
+    def test_no_service_hours_configured_means_no_restriction(self):
+        entry, assignment = self._matched_assignment()
+        starts_at = timezone.make_aware(datetime.combine(self.visit_date, time(5, 0)))
+        appointment = schedule_assignment(assignment, starts_at=starts_at, ends_at=starts_at + timedelta(minutes=45), kind="follow_up", actor=self.provider_user)
+        self.assertIsNotNone(appointment.pk)
+
+    # --- Provider Cancellation Rules: update_assignment_status() ----------
+
+    def test_provider_cancelling_within_notice_window_requires_a_reason(self):
+        update_configuration(self.org, {"provider_cancellation_notice_hours": 4}, actor=self.admin)
+        entry, assignment = self._matched_assignment()
+        starts_at = timezone.now() + timedelta(hours=2)
+        schedule_assignment(assignment, starts_at=starts_at, ends_at=starts_at + timedelta(minutes=45), kind="follow_up", actor=self.provider_user)
+        assignment.refresh_from_db()
+        with self.assertRaises(ValidationError):
+            update_assignment_status(assignment, HomeVisitAssignment.Status.CANCELLED, actor=self.provider_user)
+
+    def test_provider_cancelling_within_notice_window_succeeds_with_a_reason(self):
+        update_configuration(self.org, {"provider_cancellation_notice_hours": 4}, actor=self.admin)
+        entry, assignment = self._matched_assignment()
+        starts_at = timezone.now() + timedelta(hours=2)
+        schedule_assignment(assignment, starts_at=starts_at, ends_at=starts_at + timedelta(minutes=45), kind="follow_up", actor=self.provider_user)
+        assignment.refresh_from_db()
+        update_assignment_status(assignment, HomeVisitAssignment.Status.CANCELLED, actor=self.provider_user, reason="Family emergency")
+        assignment.refresh_from_db()
+        self.assertEqual(assignment.cancel_reason, "Family emergency")
+
+    def test_provider_cancelling_with_plenty_of_notice_needs_no_reason(self):
+        update_configuration(self.org, {"provider_cancellation_notice_hours": 4}, actor=self.admin)
+        entry, assignment = self._matched_assignment()
+        starts_at = timezone.now() + timedelta(hours=48)
+        schedule_assignment(assignment, starts_at=starts_at, ends_at=starts_at + timedelta(minutes=45), kind="follow_up", actor=self.provider_user)
+        assignment.refresh_from_db()
+        update_assignment_status(assignment, HomeVisitAssignment.Status.CANCELLED, actor=self.provider_user)  # does not raise
+
+    def test_staff_cancelling_within_notice_window_needs_no_reason(self):
+        update_configuration(self.org, {"provider_cancellation_notice_hours": 4}, actor=self.admin)
+        entry, assignment = self._matched_assignment()
+        starts_at = timezone.now() + timedelta(hours=2)
+        schedule_assignment(assignment, starts_at=starts_at, ends_at=starts_at + timedelta(minutes=45), kind="follow_up", actor=self.provider_user)
+        assignment.refresh_from_db()
+        update_assignment_status(assignment, HomeVisitAssignment.Status.CANCELLED, actor=self.admin)  # does not raise
+
+    def test_provider_cancellation_reason_not_required_when_org_turns_the_rule_off(self):
+        update_configuration(
+            self.org, {"provider_cancellation_notice_hours": 4, "provider_cancellation_requires_reason": False}, actor=self.admin,
+        )
+        entry, assignment = self._matched_assignment()
+        starts_at = timezone.now() + timedelta(hours=2)
+        schedule_assignment(assignment, starts_at=starts_at, ends_at=starts_at + timedelta(minutes=45), kind="follow_up", actor=self.provider_user)
+        assignment.refresh_from_db()
+        update_assignment_status(assignment, HomeVisitAssignment.Status.CANCELLED, actor=self.provider_user)  # does not raise
+
+    # --- Patient Cancellation Window: booking.py wiring for home visits ---
+
+    def test_patient_cannot_cancel_a_home_visit_within_the_configured_window(self):
+        update_configuration(self.org, {"patient_cancellation_window_hours": 48}, actor=self.admin)
+        entry, assignment = self._matched_assignment()
+        starts_at = timezone.now() + timedelta(hours=10)
+        appointment = schedule_assignment(assignment, starts_at=starts_at, ends_at=starts_at + timedelta(minutes=45), kind="follow_up", actor=self.provider_user)
+        self.patient.portal_user = User.objects.create_user(
+            username="config-portal-patient", password="safe-test-password", organization=self.org, role=User.Role.PATIENT,
+        )
+        self.patient.save(update_fields=["portal_user"])
+        with self.assertRaises(ChangeCutoffError):
+            cancel_portal_appointment(self.patient, str(appointment.pk))
+
+    def test_patient_can_cancel_a_home_visit_outside_the_configured_window(self):
+        update_configuration(self.org, {"patient_cancellation_window_hours": 4}, actor=self.admin)
+        entry, assignment = self._matched_assignment()
+        starts_at = timezone.now() + timedelta(hours=10)
+        appointment = schedule_assignment(assignment, starts_at=starts_at, ends_at=starts_at + timedelta(minutes=45), kind="follow_up", actor=self.provider_user)
+        self.patient.portal_user = User.objects.create_user(
+            username="config-portal-patient-2", password="safe-test-password", organization=self.org, role=User.Role.PATIENT,
+        )
+        self.patient.save(update_fields=["portal_user"])
+        cancelled = cancel_portal_appointment(self.patient, str(appointment.pk))
+        self.assertEqual(cancelled.status, Appointment.Status.CANCELLED)
+
+    # --- Notification Settings: org-level event disable --------------------
+
+    def test_disabling_an_event_skips_it_across_every_channel(self):
+        update_configuration(self.org, {"disabled_notification_events": ["SERVICE_REQUEST_CREATED"]}, actor=self.admin)
+        self.patient.email_notifications_enabled = True
+        self.patient.sms_notifications_enabled = True
+        self.patient.save(update_fields=["email_notifications_enabled", "sms_notifications_enabled"])
+        mail.outbox = []
+
+        create_request(
+            self.patient, source=MobileCareRequest.Source.FRONT_DESK,
+            address_line_1="1 Config St", city="Cary", state="NC", zip_code="27526",
+            earliest_date=self.visit_date, created_by=self.admin,
+        )
+
+        self.assertEqual(len(mail.outbox), 0)
+        events = AuditEvent.objects.filter(action="MOBILE_CARE_NOTIFICATION", metadata__event="SERVICE_REQUEST_CREATED")
+        self.assertTrue(events.filter(metadata__status="skipped_org_disabled").exists())
+        self.assertFalse(events.filter(metadata__status="delivered").exists())
+
+    def test_an_event_not_disabled_is_unaffected_by_the_org_setting(self):
+        update_configuration(self.org, {"disabled_notification_events": ["VISIT_CANCELLED"]}, actor=self.admin)
+        self.patient.email_notifications_enabled = True
+        self.patient.save(update_fields=["email_notifications_enabled"])
+        mail.outbox = []
+
+        create_request(
+            self.patient, source=MobileCareRequest.Source.FRONT_DESK,
+            address_line_1="1 Config St", city="Cary", state="NC", zip_code="27526",
+            earliest_date=self.visit_date, created_by=self.admin,
+        )
+
+        self.assertEqual(len(mail.outbox), 1)
+
+    # --- API: Organization Admin's own tenant-scoped configuration --------
+
+    def test_configuration_endpoint_requires_admin_role(self):
+        self.client.force_login(self.provider_user)  # therapist
+        response = self.client.get(reverse("api-mobile-care-configuration"))
+        self.assertEqual(response.status_code, 403)
+
+    def test_configuration_endpoint_get_returns_current_settings(self):
+        self.client.force_login(self.admin)
+        response = self.client.get(reverse("api-mobile-care-configuration"))
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["configuration"]["mobileCareEnabled"])
+
+    def test_configuration_endpoint_patch_updates_and_audits(self):
+        self.client.force_login(self.admin)
+        response = self.client.patch(
+            reverse("api-mobile-care-configuration"),
+            data=json.dumps({"maxTravelRadiusMiles": 15, "availableServices": ["follow_up"]}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()["configuration"]
+        self.assertEqual(body["maxTravelRadiusMiles"], 15)
+        self.assertEqual(body["availableServices"], ["follow_up"])
+        self.assertTrue(AuditEvent.objects.filter(action="mobile_care_configuration.updated", organization=self.org).exists())
+
+    def test_configuration_endpoint_only_affects_the_callers_own_tenant(self):
+        other_admin = User.objects.create_user(
+            username="other-config-admin", password="safe-test-password", organization=self.other_org, role=User.Role.ADMIN,
+        )
+        self.client.force_login(other_admin)
+        self.client.patch(
+            reverse("api-mobile-care-configuration"),
+            data=json.dumps({"maxTravelRadiusMiles": 99}),
+            content_type="application/json",
+        )
+        self.assertIsNone(get_configuration(self.org).max_travel_radius_miles)
+
+    def test_configuration_endpoint_rejects_an_invalid_service_hours_time(self):
+        self.client.force_login(self.admin)
+        response = self.client.patch(
+            reverse("api-mobile-care-configuration"),
+            data=json.dumps({"serviceHoursStart": "not-a-time"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 422)
+
+    # --- API: Super Admin platform-level defaults --------------------------
+
+    def test_platform_defaults_endpoint_requires_super_admin(self):
+        self.client.force_login(self.admin)
+        response = self.client.get(reverse("api-super-admin-mobile-care-platform-defaults"))
+        self.assertEqual(response.status_code, 403)
+
+    def test_platform_defaults_endpoint_get_and_patch(self):
+        super_admin = User(username="config-super-admin-3", role=User.Role.SUPER_ADMIN, is_superuser=True)
+        super_admin.set_password("safe-test-password")
+        super_admin.full_clean()
+        super_admin.save()
+        self.client.force_login(super_admin)
+
+        get_response = self.client.get(reverse("api-super-admin-mobile-care-platform-defaults"))
+        self.assertEqual(get_response.status_code, 200)
+
+        patch_response = self.client.patch(
+            reverse("api-super-admin-mobile-care-platform-defaults"),
+            data=json.dumps({"offerExpirationHours": 6}),
+            content_type="application/json",
+        )
+        self.assertEqual(patch_response.status_code, 200)
+        self.assertEqual(patch_response.json()["platformDefaults"]["offerExpirationHours"], 6)
+        self.assertTrue(AuditEvent.objects.filter(action="mobile_care_platform_defaults.updated").exists())
+
+
+class MobileCareSecurityAuditTests(TestCase):
+    """Security/tenant-isolation/regression audit of the Mobile Care module.
+    Closes two specific gaps found while auditing existing coverage:
+    match_provider() (the legacy staff-assign pipeline's actual assignment
+    commitment point) and respond_to_match(accept=True) (the accept-first
+    pipeline's) had no direct test proving a provider who becomes
+    suspended/license-expired/inactive *between* being offered and actually
+    accepting/being assigned is still rejected at that final commitment
+    point — check_provider_eligibility() itself was already exhaustively
+    tested (see ProviderEligibilityTests), but not these two real call
+    sites. Also covers cross-tenant provider injection on the legacy
+    match endpoint, which had no explicit test either."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Audit PT", slug="audit-pt")
+        self.other_org = Organization.objects.create(name="Other Audit PT", slug="other-audit-pt")
+        self.admin = User.objects.create_user(
+            username="audit-admin", password="safe-test-password", organization=self.org, role=User.Role.ADMIN,
+        )
+        self.patient = Patient.objects.create(
+            organization=self.org, first_name="Audrey", last_name="Chart", date_of_birth=date(1983, 3, 3),
+        )
+        self.visit_weekday = 0  # Monday
+        today = date.today()
+        days_ahead = (self.visit_weekday - today.weekday()) % 7 or 7
+        self.visit_date = today + timedelta(days=days_ahead)
+        self.provider_user, self.provider = self._make_provider(username="audit-provider")
+
+    def _make_provider(self, *, org=None, username):
+        org = org or self.org
+        user = User.objects.create_user(
+            username=username, password="safe-test-password", organization=org, role=User.Role.THERAPIST,
+        )
+        provider = Provider.objects.create(organization=org, user=user, first_name="Aud", last_name="Therapist")
+        UserLicense.objects.create(
+            user=user, license_number=f"PT-{username}", issuing_state="NC",
+            expires_at=date.today() + timedelta(days=365), verification_status=UserLicense.VerificationStatus.VERIFIED,
+        )
+        service_area = ServiceArea.objects.create(organization=org, provider=provider, name="Primary", is_active=True, primary_zip_code="27526")
+        ServiceAreaZipCode.objects.create(service_area=service_area, zip_code="27526")
+        HomeVisitAvailability.objects.create(
+            organization=org, provider=provider, availability_type=HomeVisitAvailability.AvailabilityType.AVAILABLE,
+            is_recurring=True, day_of_week=self.visit_weekday, start_time=time(8, 0), end_time=time(17, 0), is_active=True,
+        )
+        return user, provider
+
+    def _make_request(self):
+        return MobileCareRequest.objects.create(
+            organization=self.org, patient=self.patient,
+            address_line_1="1 Audit St", city="Cary", state="NC", zip_code="27526",
+            earliest_date=self.visit_date, requested_service=MobileCareRequest.RequestedService.FOLLOW_UP,
+        )
+
+    # --- 5/6/7: suspended / expired-license / inactive providers cannot ---
+    # --- receive a NEW assignment — at the actual commitment points -------
+
+    def test_match_provider_rejects_a_suspended_provider(self):
+        self.provider_user.status = User.Status.SUSPENDED
+        self.provider_user.is_active = False
+        self.provider_user.save(update_fields=["status", "is_active"])
+        entry = self._make_request()
+        with self.assertRaises(ValidationError):
+            match_provider(entry, self.provider, actor=self.admin)
+        entry.refresh_from_db()
+        self.assertIsNone(entry.matched_provider_id)
+
+    def test_match_provider_rejects_an_expired_license_provider(self):
+        self.provider_user.licenses.update(expires_at=date.today() - timedelta(days=1))
+        entry = self._make_request()
+        with self.assertRaises(ValidationError):
+            match_provider(entry, self.provider, actor=self.admin)
+
+    def test_match_provider_rejects_an_inactive_deactivated_provider(self):
+        self.provider.is_active = False
+        self.provider.save(update_fields=["is_active"])
+        entry = self._make_request()
+        with self.assertRaises(ValidationError):
+            match_provider(entry, self.provider, actor=self.admin)
+
+    def test_respond_to_match_rejects_acceptance_once_the_provider_is_suspended(self):
+        # The offer was valid when sent; the provider is suspended in the
+        # gap before they respond — acceptance must still be blocked, not
+        # just the initial match/offer.
+        entry = self._make_request()
+        match = generate_matches(entry, actor=self.admin)[0]
+        offer_match(match, actor=self.admin)
+        self.provider_user.status = User.Status.SUSPENDED
+        self.provider_user.is_active = False
+        self.provider_user.save(update_fields=["status", "is_active"])
+        with self.assertRaises(ValidationError):
+            respond_to_match(match, accept=True, actor=self.provider_user)
+        self.assertFalse(HomeVisitAssignment.objects.filter(provider_match=match).exists())
+
+    def test_respond_to_match_rejects_acceptance_once_the_license_expires(self):
+        entry = self._make_request()
+        match = generate_matches(entry, actor=self.admin)[0]
+        offer_match(match, actor=self.admin)
+        self.provider_user.licenses.update(expires_at=date.today() - timedelta(days=1))
+        with self.assertRaises(ValidationError):
+            respond_to_match(match, accept=True, actor=self.provider_user)
+        self.assertFalse(HomeVisitAssignment.objects.filter(provider_match=match).exists())
+
+    def test_respond_to_match_rejects_acceptance_once_the_provider_is_deactivated(self):
+        entry = self._make_request()
+        match = generate_matches(entry, actor=self.admin)[0]
+        offer_match(match, actor=self.admin)
+        self.provider.is_active = False
+        self.provider.save(update_fields=["is_active"])
+        with self.assertRaises(ValidationError):
+            respond_to_match(match, accept=True, actor=self.provider_user)
+        self.assertFalse(HomeVisitAssignment.objects.filter(provider_match=match).exists())
+
+    # --- 1/2/20: tenant isolation / no cross-tenant ID manipulation --------
+
+    def test_match_endpoint_rejects_a_provider_id_from_another_organization(self):
+        other_user, other_provider = self._make_provider(org=self.other_org, username="audit-other-provider")
+        entry = self._make_request()
+        self.client.force_login(self.admin)
+        response = self.client.post(
+            reverse("api-mobile-care-request-match", kwargs={"request_id": str(entry.pk)}),
+            data=json.dumps({"providerId": str(other_provider.pk)}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+        entry.refresh_from_db()
+        self.assertIsNone(entry.matched_provider_id)
+
+    def test_match_endpoint_is_tenant_scoped_for_the_request_itself(self):
+        other_admin = User.objects.create_user(
+            username="audit-other-admin", password="safe-test-password", organization=self.other_org, role=User.Role.ADMIN,
+        )
+        entry = self._make_request()
+        self.client.force_login(other_admin)
+        response = self.client.post(
+            reverse("api-mobile-care-request-match", kwargs={"request_id": str(entry.pk)}),
+            data=json.dumps({"providerId": str(self.provider.pk)}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_home_visit_availability_cross_tenant_provider_id_is_rejected(self):
+        other_admin = User.objects.create_user(
+            username="audit-other-admin-2", password="safe-test-password", organization=self.other_org, role=User.Role.ADMIN,
+        )
+        self.client.force_login(other_admin)
+        response = self.client.post(
+            reverse("api-mobile-care-availability-list"),
+            data=json.dumps({
+                "providerId": str(self.provider.pk), "availabilityType": "available",
+                "dayOfWeek": 0, "startTime": "08:00", "endTime": "17:00",
+            }),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)

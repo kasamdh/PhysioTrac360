@@ -584,6 +584,7 @@ function VoicePanel({ captures, patientId, refresh, report }: { captures: NonNul
 function CarePlanPanel({ workspace, patientId, refresh, report }: { workspace: PatientWorkspaceData; patientId: string; refresh: () => Promise<void>; report: (message: string) => void }) {
   const clinical = workspace.clinical!;
   return <div className="workspace-panel-grid">
+    <MobileCareEpisodeCard episodes={clinical.episodesOfCare} />
     <EpisodeOfCarePanel episodes={clinical.episodesOfCare} patientId={patientId} refresh={refresh} report={report} />
     <GoalPanel goals={clinical.goals} patientId={patientId} canSign={workspace.permissions.canSignNotes} refresh={refresh} report={report} />
     <OutcomePanel outcomes={clinical.outcomes} assignments={clinical.outcomeAssignments || []} hasPortalAccount={workspace.patient.portalStatus === "active"} patientId={patientId} refresh={refresh} report={report} />
@@ -591,14 +592,42 @@ function CarePlanPanel({ workspace, patientId, refresh, report }: { workspace: P
   </div>;
 }
 
+/** "Mobile Care Episode" — the chart-level continuity summary for whichever
+ * of the patient's episodes of care is linked to an in-home (Mobile Care)
+ * service request (see EpisodeOfCare.isMobileCareEpisode on the backend).
+ * Prefers the active one; falls back to the most recent mobile-care episode
+ * if none is active. Renders nothing for a patient with no mobile-care
+ * history, so it never clutters the chart for clinic-only patients. */
+function MobileCareEpisodeCard({ episodes }: { episodes: NonNullable<PatientWorkspaceData["clinical"]>["episodesOfCare"] }) {
+  const mobileCareEpisodes = episodes.filter((episode) => episode.isMobileCareEpisode);
+  const episode = mobileCareEpisodes.find((entry) => entry.status === "active") || mobileCareEpisodes[0];
+  if (!episode) return null;
+  return <article className="surface-card">
+    <header className="card-heading"><div><p className="eyebrow">In-home PT</p><h3>Mobile Care Episode</h3></div><span className={`status-pill ${episode.status}`}>{episode.statusLabel}</span></header>
+    <dl className="detail-grid">
+      <div><dt>Assigned PT</dt><dd>{episode.primaryTherapistName || "Not yet assigned"}</dd></div>
+      <div><dt>Start date</dt><dd>{formatDate(episode.startDate)}</dd></div>
+      <div><dt>Visit progress</dt><dd>{episode.visitsCompleted}{episode.expectedVisitCount ? ` of ${episode.expectedVisitCount}` : ""} visits{episode.visitFrequency ? ` · ${episode.visitFrequency}` : ""}</dd></div>
+      <div><dt>Next visit</dt><dd>{episode.nextVisit ? formatDate(episode.nextVisit.startsAt) : "Not scheduled"}</dd></div>
+    </dl>
+  </article>;
+}
+
 interface EpisodeDraft {
   diagnosis: string;
+  condition: string;
   status: string;
   startDate: string;
+  expectedEndDate: string;
+  visitFrequency: string;
+  expectedVisitCount: string;
   notes: string;
 }
 
-const blankEpisodeDraft = (): EpisodeDraft => ({ diagnosis: "", status: "active", startDate: dateInputValue(), notes: "" });
+const blankEpisodeDraft = (): EpisodeDraft => ({
+  diagnosis: "", condition: "", status: "active", startDate: dateInputValue(),
+  expectedEndDate: "", visitFrequency: "", expectedVisitCount: "", notes: "",
+});
 
 function EpisodeOfCarePanel({ episodes, patientId, refresh, report }: { episodes: NonNullable<PatientWorkspaceData["clinical"]>["episodesOfCare"]; patientId: string; refresh: () => Promise<void>; report: (message: string) => void }) {
   const [draft, setDraft] = useState<EpisodeDraft>(blankEpisodeDraft);
@@ -607,7 +636,11 @@ function EpisodeOfCarePanel({ episodes, patientId, refresh, report }: { episodes
   async function create(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); setError("");
     try {
-      await api.createEpisodeOfCare(patientId, { ...draft });
+      await api.createEpisodeOfCare(patientId, {
+        ...draft,
+        expectedEndDate: draft.expectedEndDate || undefined,
+        expectedVisitCount: draft.expectedVisitCount ? Number(draft.expectedVisitCount) : undefined,
+      });
       setDraft(blankEpisodeDraft());
       await refresh();
       report("Episode of care created.");
@@ -621,9 +654,15 @@ function EpisodeOfCarePanel({ episodes, patientId, refresh, report }: { episodes
     <header className="card-heading"><div><p className="eyebrow">Episode of care</p><h3>Course-of-treatment tracking</h3><p className="muted">Groups appointments and notes under one diagnosis and plan of care. A patient may have more than one over time.</p></div></header>
     <details className="workspace-details"><summary>Start new episode of care</summary><form className="stack-form" onSubmit={create}>
       <label>Diagnosis<input value={draft.diagnosis} onChange={(event) => setDraft({ ...draft, diagnosis: event.target.value })} placeholder="e.g. Right knee ACL repair" /></label>
+      <label>Condition (optional)<input value={draft.condition} onChange={(event) => setDraft({ ...draft, condition: event.target.value })} placeholder="e.g. Post-op knee replacement" /></label>
       <div className="field-grid">
         <label>Status<select value={draft.status} onChange={(event) => setDraft({ ...draft, status: event.target.value })}><option value="active">Active</option><option value="on_hold">On hold</option><option value="discharged">Discharged</option><option value="cancelled">Cancelled</option></select></label>
         <label>Start date<input type="date" value={draft.startDate} onChange={(event) => setDraft({ ...draft, startDate: event.target.value })} required /></label>
+      </div>
+      <div className="field-grid">
+        <label>Expected end date (optional)<input type="date" value={draft.expectedEndDate} onChange={(event) => setDraft({ ...draft, expectedEndDate: event.target.value })} /></label>
+        <label>Visit frequency (optional)<input value={draft.visitFrequency} onChange={(event) => setDraft({ ...draft, visitFrequency: event.target.value })} placeholder="e.g. 2x/week" /></label>
+        <label>Expected visits (optional)<input type="number" min="1" value={draft.expectedVisitCount} onChange={(event) => setDraft({ ...draft, expectedVisitCount: event.target.value })} /></label>
       </div>
       <label>Notes (optional)<textarea rows={2} value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} /></label>
       <button className="primary-button" type="submit" disabled={busy}>{busy ? "Saving..." : "Save episode"}</button>

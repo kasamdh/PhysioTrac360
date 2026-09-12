@@ -44,6 +44,16 @@ function IconDocumentation() {
   );
 }
 
+function IconHome() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M4 11.5 12 4l8 7.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M6 10v9.5a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V10" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+      <path d="M10 20.5v-6h4v6" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 function IconReports() {
   return (
     <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -128,6 +138,13 @@ export function AdminHomePage({ user, onNavigate, onLogout }: AdminHomePageProps
       tone: "teal",
     },
     {
+      key: "mobile-care",
+      label: "Mobile Care",
+      description: "Review in-home PT requests, match a provider, and schedule the visit.",
+      icon: <IconHome />,
+      tone: "blue",
+    },
+    {
       key: "reports",
       label: "Reports",
       description: "Operational reports across your practice.",
@@ -153,6 +170,7 @@ export function AdminHomePage({ user, onNavigate, onLogout }: AdminHomePageProps
     patients: true,
     documentation: user.capabilities.canAccessClinical,
     schedule: user.capabilities.canManageSchedule,
+    "mobile-care": user.capabilities.canManageSchedule,
     reports: user.role === "admin",
     users: user.capabilities.canManageAccess,
     safety: user.capabilities.canReviewAudit,
@@ -161,6 +179,7 @@ export function AdminHomePage({ user, onNavigate, onLogout }: AdminHomePageProps
     "clinic-settings": false,
     "admin-hub": false,
     credentials: false,
+    "mobile-care-platform-defaults": false,
   };
   const modules = allModules.filter((module) => visibility[module.key]);
 

@@ -257,7 +257,64 @@ export interface ServicePrice {
   label: string;
   price: string;
   isActive: boolean;
+  // Tags this row as an organization's configured home-visit price for one
+  // visit kind, or as its optional home-visit travel fee — see
+  // care/mobile_care_billing.py. A row is at most one of these, never both.
+  homeVisitKind: "evaluation" | "follow_up" | "progress" | "discharge" | "telehealth" | null;
+  homeVisitKindLabel: string | null;
+  isHomeVisitTravelFee: boolean;
+  depositAmount: string | null;
   createdAt: string;
+}
+
+export interface HomeVisitBillingEstimate {
+  paymentMethod: "insurance" | "self_pay" | "package";
+  pricingConfigured: boolean;
+  servicePriceLabel: string | null;
+  servicePriceAmount: string | null;
+  travelFeeLabel: string | null;
+  travelFeeAmount: string | null;
+  depositAmount: string | null;
+  copayAmount: string | null;
+  packageApplied: boolean;
+  packageName: string | null;
+  totalChargeAmount: string;
+  patientResponsibility: string | null;
+}
+
+// Organization Admin's own tenant-scoped Mobile Care settings — see
+// care/models.py's MobileCareConfiguration. Service Areas and Self-Pay
+// Pricing/the Travel Fee are configured through their own existing tabs
+// (ServiceArea / ServicePrice), not here.
+export interface MobileCareConfiguration {
+  mobileCareEnabled: boolean;
+  defaultVisitDurationMinutes: number | null;
+  availableServices: string[];
+  allowedProviderRoles: string[];
+  maxTravelRadiusMiles: number | null;
+  offerExpirationHours: number | null;
+  patientCancellationWindowHours: number | null;
+  providerCancellationNoticeHours: number | null;
+  providerCancellationRequiresReason: boolean;
+  sameProviderContinuityPreferred: boolean | null;
+  matchWeightOverrides: Record<string, number>;
+  serviceHoursStart: string | null;
+  serviceHoursEnd: string | null;
+  disabledNotificationEvents: string[];
+  updatedAt: string;
+}
+
+// Platform-wide Mobile Care defaults — Super Admin only, no tenant scope.
+// Every organization's MobileCareConfiguration falls back to these
+// field-by-field until it sets its own value.
+export interface MobileCarePlatformDefaults {
+  defaultVisitDurationMinutes: number;
+  offerExpirationHours: number;
+  patientCancellationWindowHours: number;
+  providerCancellationNoticeHours: number;
+  maxTravelRadiusMiles: number;
+  sameProviderContinuityPreferred: boolean;
+  updatedAt: string;
 }
 
 export interface CashPackage {
@@ -631,6 +688,7 @@ export interface NoteDetail extends NoteSummary {
   subjectiveDetails: Record<string, unknown>;
   objectiveMeasurements: Record<string, unknown>;
   dischargeDetails: Record<string, unknown>;
+  homeVisitDetails: Record<string, unknown>;
   planOfCareStart: string | null;
   planOfCareEnd: string | null;
   frequencyPerWeek: number | null;
@@ -788,13 +846,21 @@ export interface Referral {
 export interface EpisodeOfCare {
   id: string;
   diagnosis: string;
+  condition: string;
   status: string;
   statusLabel: string;
   startDate: string;
   endDate: string | null;
+  expectedEndDate: string | null;
+  visitFrequency: string;
+  expectedVisitCount: number | null;
+  visitsCompleted: number;
+  nextVisit: { id: string; startsAt: string } | null;
+  planOfCareEndDate: string | null;
   notes: string;
   primaryTherapistName: string | null;
   referralId: string | null;
+  isMobileCareEpisode: boolean;
   createdBy: string | null;
   createdAt: string;
 }
@@ -1165,6 +1231,219 @@ export interface PortalWaitlistStaffEntry extends PortalWaitlistEntry {
   patient: { id: string; fullName: string };
 }
 
+export interface PortalMobileCareRequest {
+  id: string;
+  status: string;
+  statusLabel: string;
+  stage: string;
+  stageLabel: string;
+  addressLine1: string;
+  addressLine2: string;
+  city: string;
+  state: string;
+  zipCode: string;
+  reasonForVisit: string;
+  notes: string;
+  earliestDate: string;
+  latestDate: string | null;
+  preferredTimeWindow: string;
+  preferredTimeWindowLabel: string | null;
+  requestedService: string;
+  requestedServiceLabel: string | null;
+  specialtyRequested: string;
+  primaryCondition: string;
+  providerGenderPreference: string;
+  isNewPatient: boolean;
+  paymentMethod: string;
+  mobilityNotes: string;
+  homeAccessNotes: string;
+  canEdit: boolean;
+  canCancel: boolean;
+  matchedProviderName: string | null;
+  matchedProviderCredentials: string | null;
+  matchedProviderSpecialty: string | null;
+  appointmentId: string | null;
+  appointmentStartsAt: string | null;
+  appointmentEndsAt: string | null;
+  visitInstructions: string | null;
+  // Derived, coordinate-free arrival estimate — set only while a provider is
+  // actually en route, and only ever a minutes-away figure. No raw location
+  // or location history is ever exposed to the patient portal.
+  providerTravelStatus: "en_route" | null;
+  estimatedMinutesAway: number | null;
+  // Only present when billing is enabled for this organization — see
+  // care/mobile_care_billing.py:estimate_home_visit_charges.
+  billingEstimate: HomeVisitBillingEstimate | null;
+  createdAt: string;
+}
+
+export interface MobileCareRequest extends PortalMobileCareRequest {
+  source: string;
+  sourceLabel: string;
+  providerGenderPreferenceLabel: string;
+  paymentMethodLabel: string;
+  preferredProviderId: string | null;
+  preferredProviderName: string | null;
+  matchedProviderId: string | null;
+  episodeOfCareId: string | null;
+  appointmentStatus: string | null;
+  patient: { id: string; fullName: string };
+}
+
+export interface MobileCareProviderMatch {
+  id: string;
+  displayName: string;
+  credentials: string;
+  specialty: string;
+  isContinuity: boolean;
+}
+
+export interface HomeVisitAvailability {
+  id: string;
+  providerId: string;
+  providerName: string;
+  availabilityType: string;
+  availabilityTypeLabel: string;
+  isRecurring: boolean;
+  dayOfWeek: number | null;
+  dayOfWeekLabel: string | null;
+  specificDate: string | null;
+  startTime: string;
+  endTime: string;
+  serviceAreaId: string | null;
+  serviceAreaName: string | null;
+  effectiveFrom: string | null;
+  effectiveUntil: string | null;
+  notes: string;
+  isActive: boolean;
+  createdAt: string;
+}
+
+export interface MobileCareServiceArea {
+  id: string;
+  name: string;
+  isActive: boolean;
+  providerId: string;
+  providerName: string;
+  zipCodes: string[];
+  primaryZipCode: string;
+  city: string;
+  state: string;
+  radiusMiles: number | null;
+  maxTravelDistanceMiles: number | null;
+  isEligible: boolean;
+  ineligibilityReason: string | null;
+}
+
+export interface MobileCareStatusHistoryEntry {
+  id: string;
+  action: string;
+  actorName: string | null;
+  createdAt: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface MobileCareDashboardData {
+  cardCounts: {
+    todaysHomeVisits: number;
+    pendingRequests: number;
+    providerOffers: number;
+    activeCareEpisodes: number;
+    visitsNeedingAssignment: number;
+    licenseProviderIssues: number;
+  };
+  pendingRequests: MobileCareRequest[];
+  todaysHomeVisits: Appointment[];
+  unassignedRequests: MobileCareRequest[];
+  activeCareEpisodes: EpisodeOfCare[];
+}
+
+export interface MobileCareOfferPreview {
+  id: string;
+  requestedDate: string;
+  preferredTimeWindow: string;
+  preferredTimeWindowLabel: string | null;
+  generalArea: string;
+  serviceType: string;
+  serviceTypeLabel: string | null;
+  specialtyRequested: string;
+  estimatedDurationMinutes: number;
+  distanceLabel: string | null;
+  patientStatus: string;
+  paymentMethodLabel: string;
+  status: string;
+  statusLabel: string;
+  offeredAt: string | null;
+  expiresAt: string | null;
+}
+
+export interface MobileCareMatchScoreBreakdown {
+  continuity: number | null;
+  specialty: number | null;
+  availability: number | null;
+  distance: number | null;
+  preference: number | null;
+  caseload: number | null;
+}
+
+export interface MobileCarePersistedMatch {
+  id: string;
+  serviceRequestId: string;
+  providerId: string;
+  providerName: string;
+  rank: number;
+  matchReason: string;
+  status: string;
+  statusLabel: string;
+  score: number | null;
+  scoreBreakdown: MobileCareMatchScoreBreakdown | null;
+  reasons: string[];
+  offeredAt: string | null;
+  respondedAt: string | null;
+  declineReason: string;
+  patient: { id: string; fullName: string };
+  addressLine1: string;
+  city: string;
+  state: string;
+  zipCode: string;
+  earliestDate: string;
+}
+
+export interface MobileCareAssignment {
+  id: string;
+  serviceRequestId: string;
+  providerId: string;
+  providerName: string;
+  status: string;
+  statusLabel: string;
+  acceptedAt: string | null;
+  scheduledAt: string | null;
+  enRouteAt: string | null;
+  arrivedAt: string | null;
+  completedAt: string | null;
+  cancelledAt: string | null;
+  appointmentId: string | null;
+  visitStartsAt: string | null;
+  visitEndsAt: string | null;
+  visitKind: string | null;
+  visitKindLabel: string | null;
+  clinicalNoteId: string | null;
+  patient: { id: string; fullName: string };
+  addressLine1: string;
+  addressLine2: string;
+  city: string;
+  state: string;
+  zipCode: string;
+}
+
+export interface MobileCareTravelStatusEntry {
+  id: string;
+  status: string;
+  statusLabel: string;
+  note: string;
+  createdAt: string;
+}
+
 export interface PortalFormField {
   key: string;
   label: string;
@@ -1309,6 +1588,7 @@ export interface PortalPaymentAttempt {
   statusLabel: string;
   attemptedAt: string;
   message: string;
+  mobileCareRequestId: string | null;
 }
 
 export interface PortalPayments {
@@ -1366,6 +1646,7 @@ export interface PortalProfile {
   pharmacyAddress: string;
   preferredContactMethod: string;
   emailNotificationsEnabled: boolean;
+  smsNotificationsEnabled: boolean;
   pendingChangeRequest: PortalProfileChangeRequest | null;
 }
 
