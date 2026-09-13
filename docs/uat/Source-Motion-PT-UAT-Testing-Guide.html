@@ -1,0 +1,724 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Source Motion PT — UAT Testing Guide</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: "Segoe UI", Arial, Helvetica, sans-serif; color: #202c3f; font-size: 10.3pt; line-height: 1.5; margin: 0; }
+
+  .cover { padding-top: 2.3in; page-break-after: always; }
+  .cover .brandbar { width: 70px; height: 8px; background: #a11d3d; margin-bottom: 24px; }
+  .cover h1 { font-size: 26pt; margin: 0 0 2px; color: #171f2a; letter-spacing: -0.01em; page-break-before: avoid; }
+  .cover h2 { font-size: 20pt; margin: 0 0 6px; color: #a11d3d; font-weight: 800; page-break-before: avoid; }
+  .cover .sub { font-size: 13pt; color: #445; font-weight: 600; margin: 0 0 30px; }
+  .cover table.meta { border-collapse: collapse; font-size: 10.5pt; }
+  .cover table.meta td { padding: 3px 10px 3px 0; }
+  .cover table.meta td.k { color: #667085; font-weight: 700; width: 140px; }
+  .warn-box { background: #fff2d8; border: 1px solid #e0b34d; border-left: 5px solid #9b6908; padding: 10px 14px; margin-top: 26px; border-radius: 4px; font-size: 9.7pt; max-width: 5.6in; }
+  .warn-box strong { color: #7a4e00; }
+
+  h1 { font-size: 17pt; color: #a11d3d; border-bottom: 2px solid #a11d3d; padding-bottom: 7px; margin: 0 0 12px; page-break-before: always; }
+  h1.nobreak { page-break-before: avoid; }
+  h2 { font-size: 12.5pt; color: #171f2a; margin: 16px 0 5px; }
+  h3 { font-size: 11pt; color: #171f2a; margin: 12px 0 4px; }
+  p { margin: 5px 0; orphans: 3; widows: 3; }
+  ul, ol { margin: 5px 0; padding-left: 20px; }
+  li { margin: 3px 0; }
+  strong { color: #171f2a; }
+  code { background: #f4f2ee; border: 1px solid #ece5df; border-radius: 4px; padding: 0 4px; font-family: Consolas, monospace; font-size: 9pt; }
+
+  table { width: 100%; border-collapse: collapse; margin: 8px 0 14px; font-size: 9.3pt; }
+  th, td { border: 1px solid #ddd6cc; padding: 5px 7px; text-align: left; vertical-align: top; }
+  th { background: #fbe9ee; color: #7a1730; font-weight: 700; }
+  tr:nth-child(even) td { background: #fbfaf8; }
+
+  .toc ol { list-style: none; padding-left: 0; counter-reset: sect; }
+  .toc > ol > li { counter-increment: sect; margin: 8px 0 2px; font-weight: 700; font-size: 10.5pt; }
+  .toc > ol > li::before { content: counter(sect) ".  "; color: #a11d3d; }
+  .toc a { color: inherit; text-decoration: none; }
+
+  .who { display: inline-block; background: #171f2a; color: #fff; border-radius: 3px; padding: 2px 9px; font-size: 8.6pt; margin: 2px 0 8px; }
+
+  .testcase { border: 1px solid #ddd6cc; border-radius: 8px; margin: 14px 0 22px; overflow: hidden; page-break-inside: avoid; }
+  .testcase .tc-head { background: #a11d3d; color: #fff; padding: 9px 14px; font-size: 11.5pt; font-weight: 800; letter-spacing: .01em; }
+  .testcase .tc-body { padding: 12px 16px; }
+  .testcase .tc-who { color: #667085; font-size: 9.2pt; margin-bottom: 8px; }
+  .testcase .tc-who strong { color: #171f2a; }
+  .testcase ol.steps { margin: 4px 0 10px; padding-left: 22px; }
+  .testcase ol.steps li { margin: 5px 0; }
+  .shot { border: 1px solid #ccc3b6; border-radius: 6px; margin: 8px 0 14px; max-width: 100%; page-break-inside: avoid; }
+  .shot img { width: 100%; display: block; border-radius: 5px 5px 0 0; }
+  .shot .cap { background: #f4f2ee; color: #667085; font-size: 8.4pt; padding: 4px 8px; border-top: 1px solid #ccc3b6; font-style: italic; }
+  .expected { background: #e8f6ec; border-left: 4px solid #26714f; padding: 8px 12px; margin: 8px 0; border-radius: 4px; font-size: 9.6pt; }
+  .expected strong.label { display: block; text-transform: uppercase; letter-spacing: .04em; font-size: 8.3pt; color: #1c5237; margin-bottom: 3px; }
+  .passfail { display: flex; gap: 28px; align-items: center; margin: 12px 0 8px; font-size: 11pt; font-weight: 700; }
+  .passfail .box { display: inline-block; width: 16px; height: 16px; border: 2px solid #171f2a; margin-right: 7px; vertical-align: -2px; }
+  .fail-notes { border-top: 1px dashed #ccc3b6; margin-top: 10px; padding-top: 8px; }
+  .fail-notes .label { font-size: 8.6pt; text-transform: uppercase; letter-spacing: .03em; color: #667085; font-weight: 700; margin-bottom: 4px; }
+  .writeline { border-bottom: 1px solid #bbb; height: 20px; margin: 4px 0 10px; }
+  .tester-row { display: flex; gap: 40px; margin-top: 10px; font-size: 9.4pt; }
+  .tester-row div { flex: 1; }
+  .tester-row .writeline { margin-top: 4px; }
+
+  .note-box { background: #f1ecff; border-left: 4px solid #5c4eb3; padding: 8px 12px; margin: 10px 0 16px; border-radius: 4px; font-size: 9.3pt; }
+  .instr-box { background: #f7f4f0; border: 1px solid #ece5df; border-radius: 6px; padding: 12px 16px; margin: 10px 0 18px; font-size: 10pt; }
+  .instr-box ol { margin: 4px 0 0; }
+  .creds-label { display:inline-block; background:#a11d3d; color:#fff; font-size:8.4pt; font-weight:700; padding:2px 8px; border-radius:3px; letter-spacing:.03em; margin-bottom:8px; }
+</style>
+</head>
+<body>
+
+<!-- ==================== COVER ==================== -->
+<div class="cover">
+  <div class="brandbar"></div>
+  <h1>SOURCE MOTION PT</h1>
+  <h2>USER ACCEPTANCE TESTING GUIDE</h2>
+  <p class="sub">Step-by-Step Software Testing Instructions</p>
+  <table class="meta">
+    <tr><td class="k">Version:</td><td>1.0</td></tr>
+    <tr><td class="k">Generated Date:</td><td>September 2026</td></tr>
+    <tr><td class="k">Environment:</td><td>Local development / staging (not production)</td></tr>
+    <tr><td class="k">Test URL:</td><td>http://127.0.0.1:5173/ &nbsp;<em>(replace with your staging URL if testing remotely)</em></td></tr>
+  </table>
+  <div class="warn-box">
+    <strong>Before you begin:</strong> Every login, patient, and appointment used in this guide is
+    <strong>synthetic test data</strong> created specifically for testing — nothing here is a real
+    person. Never enter real patient information, real passwords, or real payment details while
+    following this guide. If you're testing against your own staging environment and don't yet have
+    test accounts, ask your administrator to run the same setup described in Section 2.
+  </div>
+</div>
+
+<!-- ==================== TOC ==================== -->
+<div class="toc">
+<h1 class="nobreak" style="page-break-before:avoid;">Table of Contents</h1>
+<ol>
+  <li><a href="#quickstart">Quick Start — How to Begin Testing</a></li>
+  <li><a href="#accounts">Test Accounts (Synthetic — Never Real Credentials)</a></li>
+  <li><a href="#inventory">Module Inventory</a></li>
+  <li><a href="#login">Section 1 — Login &amp; Getting Started</a></li>
+  <li><a href="#patients">Section 2 — Patients</a></li>
+  <li><a href="#scheduling">Section 3 — Scheduling</a></li>
+  <li><a href="#documentation">Section 4 — Clinical Documentation</a></li>
+  <li><a href="#mobilecare">Section 5 — Mobile Care (In-Home PT)</a></li>
+  <li><a href="#billing">Section 6 — Billing</a></li>
+  <li><a href="#admin">Section 7 — Administration</a></li>
+  <li><a href="#reports">Section 8 — Reports</a></li>
+  <li><a href="#safety">Section 9 — Safety &amp; Audit</a></li>
+  <li><a href="#otherroles">Section 10 — Other Staff Roles</a></li>
+  <li><a href="#superadmin">Section 11 — Platform / Super Admin</a></li>
+  <li><a href="#portal">Section 12 — Patient Portal</a></li>
+  <li><a href="#isolation">Section 13 — Two-Clinic Isolation Check</a></li>
+  <li><a href="#logout">Section 14 — Logging Out</a></li>
+  <li><a href="#summary">Final Summary Sheet</a></li>
+</ol>
+</div>
+
+<!-- ==================== QUICK START ==================== -->
+<h1 id="quickstart" class="nobreak" style="page-break-before:avoid;">1. Quick Start — How to Begin Testing</h1>
+<div class="instr-box">
+<strong>HOW TO START TESTING</strong>
+<ol>
+  <li>Open <strong>Google Chrome</strong> (or Microsoft Edge).</li>
+  <li>Go to:<br><code>http://127.0.0.1:5173/</code> &nbsp;<em>(or your organization's test/staging URL)</em></li>
+  <li>Enter:<br>Username: <span class="writeline" style="display:inline-block;width:220px;"></span><br>Password: <span class="writeline" style="display:inline-block;width:220px;"></span></li>
+  <li>Click: <strong>SIGN IN</strong></li>
+  <li>You should see: <strong>the Source Motion PT Home Page</strong> for your role.</li>
+</ol>
+</div>
+<div class="shot">
+  <img src="screenshots/01-login-screen.png" alt="Login screen">
+  <div class="cap">The sign-in screen you should see before logging in.</div>
+</div>
+<div class="passfail"><span><span class="box"></span>PASS</span><span><span class="box"></span>FAIL</span></div>
+<div class="fail-notes"><div class="label">Comments</div><div class="writeline"></div><div class="writeline"></div></div>
+
+<!-- ==================== TEST ACCOUNTS ==================== -->
+<h1 id="accounts">2. Test Accounts (Synthetic — Never Real Credentials)</h1>
+<div class="warn-box">
+  <strong>THESE ARE TEST ACCOUNTS ONLY.</strong> Every account below was created by a script
+  (<code>manage.py create_uat_test_data</code>) specifically for testing, using a
+  <code>@uat.test</code> email domain that does not receive real mail. They carry no real patient
+  data. Do not reuse this password anywhere else, and do not create accounts like this against a
+  real production database with real patients.
+</div>
+<span class="creds-label">TEST ACCOUNT ONLY</span>
+<table>
+<tr><th>Role</th><th>Username</th><th>Password</th><th>What this account tests</th></tr>
+<tr><td>Super Admin</td><td>superadmin.uat@uat.test</td><td rowspan="7" style="vertical-align:middle;">Uat-Test-Pw-88214!</td><td>Clients, platform users, system administration</td></tr>
+<tr><td>Organization Admin</td><td>admin.uat@uat.test</td><td>Clinic administration, reports, settings</td></tr>
+<tr><td>Physical Therapist (PT)</td><td>pt.uat@uat.test</td><td>Patients and clinical documentation</td></tr>
+<tr><td>PTA</td><td>pta.uat@uat.test</td><td>Treatment documentation</td></tr>
+<tr><td>Front Desk / Scheduler</td><td>frontdesk.uat@uat.test</td><td>Patients and scheduling</td></tr>
+<tr><td>Biller</td><td>billing.uat@uat.test</td><td>Billing</td></tr>
+<tr><td>Patient</td><td>patient.uat@uat.test</td><td>Patient portal</td></tr>
+</table>
+<p>All seven accounts belong to a dedicated test organization called <strong>"UAT Test Clinic"</strong>,
+which also has one test patient ("Uat Testpatient"), a test location, a test appointment type, one
+scheduled test appointment, and one Mobile Care test request already set up — so every screen below
+has something real to look at instead of an empty page.</p>
+<div class="note-box">If these accounts don't exist yet in your environment, ask a developer to run:
+<code>python manage.py create_uat_test_data</code> — it's safe to run more than once and will not
+touch any real client or patient data.</div>
+
+<!-- ==================== MODULE INVENTORY ==================== -->
+<h1 id="inventory">3. Module Inventory</h1>
+<p>This is the complete list of screens found in the application at the time this guide was written,
+based on inspecting the actual running software and its source code — not assumptions. "Screenshot
+in this guide" means a real, live screenshot appears later in this document for that screen. A
+"No" doesn't mean the screen is broken — it means this version of the guide doesn't yet walk through
+it step by step; the screen still exists and works.</p>
+<table>
+<tr><th>Module</th><th>Route</th><th>Who Can Access</th><th>Screenshot in this guide</th></tr>
+<tr><td>Login</td><td>/</td><td>Everyone</td><td>Yes</td></tr>
+<tr><td>Home / Dashboard</td><td>#dashboard</td><td>All staff roles (role-specific view)</td><td>Yes</td></tr>
+<tr><td>Patients</td><td>#patients</td><td>Admin, Director, Scheduler, Therapist, PTA, Compliance</td><td>Yes</td></tr>
+<tr><td>Scheduling</td><td>#schedule</td><td>Admin, Director, Scheduler, Therapist, PTA</td><td>Yes</td></tr>
+<tr><td>Documentation</td><td>#documentation</td><td>Admin, Director, Therapist, PTA</td><td>Yes</td></tr>
+<tr><td>Mobile Care (dashboard, requests, offers, availability, service area)</td><td>#mobile-care</td><td>Admin, Director, Scheduler, Therapist, PTA</td><td>Yes (dashboard)</td></tr>
+<tr><td>Billing (charges, claims, payments, statements, packages, superbills)</td><td>inside a patient's chart → Operations</td><td>Admin, Director, Biller (Scheduler: view + collect only)</td><td>Yes</td></tr>
+<tr><td>Users (staff management)</td><td>#users</td><td>Admin (own org) / Super Admin (any org)</td><td>Yes</td></tr>
+<tr><td>Clinic Settings (locations, appointment types, payers, prices, Mobile Care settings)</td><td>#clinic-settings</td><td>Admin only</td><td>Yes</td></tr>
+<tr><td>Reports</td><td>#reports</td><td>Admin only</td><td>Yes</td></tr>
+<tr><td>Safety &amp; Audit</td><td>#safety</td><td>Admin, Director, Compliance</td><td>Yes</td></tr>
+<tr><td>Client Management</td><td>#clients</td><td>Super Admin only</td><td>Yes</td></tr>
+<tr><td>Platform Administration Hub</td><td>#admin-hub</td><td>Super Admin only</td><td>Yes</td></tr>
+<tr><td>Credential Dashboard (license tracking)</td><td>#credentials</td><td>Super Admin only</td><td>Yes</td></tr>
+<tr><td>Mobile Care Platform Defaults</td><td>#mobile-care-platform-defaults</td><td>Super Admin only</td><td>No</td></tr>
+<tr><td>Provider Availability (Mobile Care)</td><td>inside Mobile Care tab</td><td>Admin, Director, the provider themselves</td><td>No</td></tr>
+<tr><td>Provider Service Area (Mobile Care)</td><td>inside Clinic Settings / Mobile Care tab</td><td>Admin</td><td>No</td></tr>
+<tr><td>Provider Matching &amp; Offers (Mobile Care)</td><td>inside Mobile Care tab</td><td>Admin, Director, Therapist, PTA</td><td>No</td></tr>
+<tr><td>Patient Portal — Home</td><td>Portal → Home</td><td>Patient</td><td>Yes</td></tr>
+<tr><td>Patient Portal — My Appointments</td><td>Portal → My Appointments</td><td>Patient</td><td>Yes</td></tr>
+<tr><td>Patient Portal — Book a Visit</td><td>Portal → Book a Visit</td><td>Patient</td><td>No</td></tr>
+<tr><td>Patient Portal — In-Home PT</td><td>Portal → In-Home PT</td><td>Patient</td><td>Yes</td></tr>
+<tr><td>Patient Portal — Forms</td><td>Portal → Forms</td><td>Patient</td><td>No</td></tr>
+<tr><td>Patient Portal — Documents</td><td>Portal → Documents</td><td>Patient</td><td>No</td></tr>
+<tr><td>Patient Portal — My Exercises</td><td>Portal → My Exercises</td><td>Patient</td><td>No</td></tr>
+<tr><td>Patient Portal — Outcome Measures</td><td>Portal → Outcome Measures</td><td>Patient</td><td>No</td></tr>
+<tr><td>Patient Portal — Messages</td><td>Portal → Messages</td><td>Patient</td><td>No</td></tr>
+<tr><td>Patient Portal — Payments</td><td>Portal → Payments</td><td>Patient</td><td>No</td></tr>
+<tr><td>Patient Portal — Waitlist</td><td>Portal → Waitlist</td><td>Patient</td><td>No</td></tr>
+<tr><td>Patient Portal — Profile</td><td>Portal → Profile</td><td>Patient</td><td>Yes</td></tr>
+<tr><td>Notifications (in-app/email/SMS)</td><td>cross-cutting, not a dedicated screen</td><td>All, per event</td><td>No</td></tr>
+<tr><td>Session security / logout</td><td>any page → Logout</td><td>Everyone</td><td>Yes</td></tr>
+</table>
+
+<!-- ==================== SECTION 1: LOGIN ==================== -->
+<h1 id="login">Section 1 — Login &amp; Getting Started</h1>
+
+<div class="testcase">
+  <div class="tc-head">TEST 1.1 — SIGN IN AS ORGANIZATION ADMIN</div>
+  <div class="tc-body">
+    <div class="tc-who"><strong>Who should test:</strong> Anyone</div>
+    <strong>START HERE:</strong>
+    <ol class="steps">
+      <li>Go to the test URL.</li>
+      <li>Type <code>admin.uat@uat.test</code> into the User Id box.</li>
+      <li>Type <code>Uat-Test-Pw-88214!</code> into the Password box.</li>
+      <li>Click <strong>Sign In</strong>.</li>
+    </ol>
+    <div class="shot"><img src="screenshots/02-admin-home.png" alt="Admin home screen"><div class="cap">The Admin's home screen after a successful sign-in.</div></div>
+    <div class="expected"><strong class="label">Expected result</strong>You should see the "UAT Test Clinic" home page with tiles for Patients, Documentation, Scheduling, Mobile Care, Reports, Administration, and Safety &amp; audit.</div>
+    <div class="passfail"><span><span class="box"></span>PASS</span><span><span class="box"></span>FAIL</span></div>
+    <div class="fail-notes"><div class="label">If it failed, what happened?</div><div class="writeline"></div><div class="writeline"></div></div>
+    <div class="tester-row"><div>Tester Name<div class="writeline"></div></div><div>Date<div class="writeline"></div></div></div>
+  </div>
+</div>
+
+<div class="testcase">
+  <div class="tc-head">TEST 1.2 — WRONG PASSWORD IS REJECTED</div>
+  <div class="tc-body">
+    <div class="tc-who"><strong>Who should test:</strong> Anyone</div>
+    <strong>START HERE:</strong>
+    <ol class="steps">
+      <li>Sign out if you're signed in.</li>
+      <li>Type <code>admin.uat@uat.test</code> into the User Id box.</li>
+      <li>Type any <strong>wrong</strong> password on purpose.</li>
+      <li>Click <strong>Sign In</strong>.</li>
+    </ol>
+    <div class="expected"><strong class="label">Expected result</strong>A message says the username or password is wrong. You are NOT let into the app.</div>
+    <div class="passfail"><span><span class="box"></span>PASS</span><span><span class="box"></span>FAIL</span></div>
+    <div class="fail-notes"><div class="label">If it failed, what happened?</div><div class="writeline"></div><div class="writeline"></div></div>
+    <div class="tester-row"><div>Tester Name<div class="writeline"></div></div><div>Date<div class="writeline"></div></div></div>
+  </div>
+</div>
+
+<!-- ==================== SECTION 2: PATIENTS ==================== -->
+<h1 id="patients">Section 2 — Patients</h1>
+
+<div class="testcase">
+  <div class="tc-head">TEST 2.1 — VIEW THE PATIENTS LIST</div>
+  <div class="tc-body">
+    <div class="tc-who"><strong>Who should test:</strong> Admin, Front Desk, or Therapist</div>
+    <strong>START HERE:</strong>
+    <ol class="steps">
+      <li>Log in as Admin (or Front Desk).</li>
+      <li>From the Home page, click <strong>Patients</strong>.</li>
+    </ol>
+    <div class="shot"><img src="screenshots/03-patients-list.png" alt="Patients list"><div class="cap">The Patients list, showing the synthetic test patient "Uat Testpatient."</div></div>
+    <div class="expected"><strong class="label">Expected result</strong>A list of patients appears, including "Uat Testpatient." A search box and a "+ New patient" button are visible.</div>
+    <div class="passfail"><span><span class="box"></span>PASS</span><span><span class="box"></span>FAIL</span></div>
+    <div class="fail-notes"><div class="label">If it failed, what happened?</div><div class="writeline"></div><div class="writeline"></div></div>
+    <div class="tester-row"><div>Tester Name<div class="writeline"></div></div><div>Date<div class="writeline"></div></div></div>
+  </div>
+</div>
+
+<div class="testcase">
+  <div class="tc-head">TEST 2.2 — ADD A NEW PATIENT</div>
+  <div class="tc-body">
+    <div class="tc-who"><strong>Who should test:</strong> Front Desk or Admin</div>
+    <strong>START HERE:</strong>
+    <ol class="steps">
+      <li>From the Patients screen, click <strong>+ New patient</strong>.</li>
+      <li>Enter:<br>First Name: <code>Test</code><br>Last Name: <code>Patient</code><br>Date of Birth: <code>01/01/1990</code><br>Email: <code>testpatient@example.com</code><br>Phone: <code>919-555-0100</code></li>
+      <li>Click <strong>Save</strong> (or Create patient).</li>
+    </ol>
+    <div class="shot"><img src="screenshots/04-new-patient-dialog.png" alt="New Patient dialog"><div class="cap">The Add a Patient form.</div></div>
+    <div class="expected"><strong class="label">Expected result</strong>A message confirms the patient was created. The new patient appears in the Patient list.</div>
+    <div class="passfail"><span><span class="box"></span>PASS</span><span><span class="box"></span>FAIL</span></div>
+    <div class="fail-notes"><div class="label">If it failed, what happened?</div><div class="writeline"></div><div class="writeline"></div></div>
+    <div class="tester-row"><div>Tester Name<div class="writeline"></div></div><div>Date<div class="writeline"></div></div></div>
+  </div>
+</div>
+
+<!-- ==================== SECTION 3: SCHEDULING ==================== -->
+<h1 id="scheduling">Section 3 — Scheduling</h1>
+
+<div class="testcase">
+  <div class="tc-head">TEST 3.1 — VIEW THE SCHEDULING CALENDAR</div>
+  <div class="tc-body">
+    <div class="tc-who"><strong>Who should test:</strong> Admin, Front Desk, or Therapist</div>
+    <strong>START HERE:</strong>
+    <ol class="steps">
+      <li>From the Home page, click <strong>Scheduling</strong>.</li>
+    </ol>
+    <div class="shot"><img src="screenshots/05-scheduling-calendar.png" alt="Scheduling calendar"><div class="cap">The Scheduling calendar, showing the test appointment for tomorrow.</div></div>
+    <div class="expected"><strong class="label">Expected result</strong>A calendar appears with Day/Week/Work week/Month view buttons and a "+ New event" button.</div>
+    <div class="passfail"><span><span class="box"></span>PASS</span><span><span class="box"></span>FAIL</span></div>
+    <div class="fail-notes"><div class="label">If it failed, what happened?</div><div class="writeline"></div><div class="writeline"></div></div>
+    <div class="tester-row"><div>Tester Name<div class="writeline"></div></div><div>Date<div class="writeline"></div></div></div>
+  </div>
+</div>
+
+<div class="testcase">
+  <div class="tc-head">TEST 3.2 — START BOOKING A NEW APPOINTMENT</div>
+  <div class="tc-body">
+    <div class="tc-who"><strong>Who should test:</strong> Admin, Front Desk, or Therapist</div>
+    <strong>START HERE:</strong>
+    <ol class="steps">
+      <li>From the Scheduling screen, click <strong>+ New event</strong>.</li>
+    </ol>
+    <div class="shot"><img src="screenshots/06-new-appointment-dialog.png" alt="New appointment dialog"><div class="cap">The New calendar event form.</div></div>
+    <div class="expected"><strong class="label">Expected result</strong>A form appears asking for Patient, Start/End time, Visit type, and Location.</div>
+    <div class="passfail"><span><span class="box"></span>PASS</span><span><span class="box"></span>FAIL</span></div>
+    <div class="fail-notes"><div class="label">If it failed, what happened?</div><div class="writeline"></div><div class="writeline"></div></div>
+    <div class="tester-row"><div>Tester Name<div class="writeline"></div></div><div>Date<div class="writeline"></div></div></div>
+  </div>
+</div>
+
+<!-- ==================== SECTION 4: DOCUMENTATION ==================== -->
+<h1 id="documentation">Section 4 — Clinical Documentation</h1>
+
+<div class="testcase">
+  <div class="tc-head">TEST 4.1 — VIEW THE DOCUMENTATION INBOX</div>
+  <div class="tc-body">
+    <div class="tc-who"><strong>Who should test:</strong> Admin, Director, Therapist, or PTA</div>
+    <strong>START HERE:</strong>
+    <ol class="steps">
+      <li>From the Home page, click <strong>Documentation</strong>.</li>
+    </ol>
+    <div class="shot"><img src="screenshots/07-documentation-inbox.png" alt="Documentation inbox"><div class="cap">The Documentation inbox.</div></div>
+    <div class="expected"><strong class="label">Expected result</strong>A list of clinical notes appears (it may be empty for a brand-new test clinic) with filter tabs (All, My Documentation, Unsigned Notes, ...) and a "+ New Note" button.</div>
+    <div class="passfail"><span><span class="box"></span>PASS</span><span><span class="box"></span>FAIL</span></div>
+    <div class="fail-notes"><div class="label">If it failed, what happened?</div><div class="writeline"></div><div class="writeline"></div></div>
+    <div class="tester-row"><div>Tester Name<div class="writeline"></div></div><div>Date<div class="writeline"></div></div></div>
+  </div>
+</div>
+
+<div class="testcase">
+  <div class="tc-head">TEST 4.2 — START A NEW CLINICAL NOTE (AS THERAPIST)</div>
+  <div class="tc-body">
+    <div class="tc-who"><strong>Who should test:</strong> Physical Therapist or PTA</div>
+    <strong>START HERE:</strong>
+    <ol class="steps">
+      <li>Log out, then log in as <code>pt.uat@uat.test</code>.</li>
+      <li>Click <strong>Documentation</strong>, then click <strong>+ New Note</strong>.</li>
+    </ol>
+    <div class="shot"><img src="screenshots/14-start-documentation-dialog.png" alt="Start Documentation dialog"><div class="cap">The Start Documentation dialog.</div></div>
+    <div class="expected"><strong class="label">Expected result</strong>A dialog appears asking you to search for a Patient and choose a Note Type (e.g. Initial Evaluation).</div>
+    <div class="passfail"><span><span class="box"></span>PASS</span><span><span class="box"></span>FAIL</span></div>
+    <div class="fail-notes"><div class="label">If it failed, what happened?</div><div class="writeline"></div><div class="writeline"></div></div>
+    <div class="tester-row"><div>Tester Name<div class="writeline"></div></div><div>Date<div class="writeline"></div></div></div>
+  </div>
+</div>
+
+<!-- ==================== SECTION 5: MOBILE CARE ==================== -->
+<h1 id="mobilecare">Section 5 — Mobile Care (In-Home PT)</h1>
+
+<div class="testcase">
+  <div class="tc-head">TEST 5.1 — VIEW THE MOBILE CARE DASHBOARD</div>
+  <div class="tc-body">
+    <div class="tc-who"><strong>Who should test:</strong> Admin, Director, Front Desk, Therapist, or PTA</div>
+    <strong>START HERE:</strong>
+    <ol class="steps">
+      <li>Log in as Admin.</li>
+      <li>From the Home page, click <strong>Mobile Care</strong>.</li>
+    </ol>
+    <div class="shot"><img src="screenshots/08-mobile-care-dashboard.png" alt="Mobile Care dashboard"><div class="cap">The Mobile Care Home tab, showing the one synthetic test request.</div></div>
+    <div class="expected"><strong class="label">Expected result</strong>You should see cards for Today's home visits, Pending requests, Provider offers, Active care episodes, Visits needing assignment, and License/provider issues — with "Pending requests" showing at least 1, and "Uat Testpatient" listed under Pending service requests.</div>
+    <div class="passfail"><span><span class="box"></span>PASS</span><span><span class="box"></span>FAIL</span></div>
+    <div class="fail-notes"><div class="label">If it failed, what happened?</div><div class="writeline"></div><div class="writeline"></div></div>
+    <div class="tester-row"><div>Tester Name<div class="writeline"></div></div><div>Date<div class="writeline"></div></div></div>
+  </div>
+</div>
+
+<div class="testcase">
+  <div class="tc-head">TEST 5.2 — THERAPIST'S OWN MOBILE CARE VIEW</div>
+  <div class="tc-body">
+    <div class="tc-who"><strong>Who should test:</strong> Physical Therapist</div>
+    <strong>START HERE:</strong>
+    <ol class="steps">
+      <li>Log in as <code>pt.uat@uat.test</code>.</li>
+      <li>Click <strong>Mobile Care</strong>.</li>
+    </ol>
+    <div class="shot"><img src="screenshots/15-therapist-mobile-care.png" alt="Therapist Mobile Care view"><div class="cap">A Therapist's own, narrower Mobile Care view.</div></div>
+    <div class="expected"><strong class="label">Expected result</strong>The same Mobile Care screen appears, but "Today's home visits" and "Provider offers" are scoped to this therapist only, not the whole clinic.</div>
+    <div class="passfail"><span><span class="box"></span>PASS</span><span><span class="box"></span>FAIL</span></div>
+    <div class="fail-notes"><div class="label">If it failed, what happened?</div><div class="writeline"></div><div class="writeline"></div></div>
+    <div class="tester-row"><div>Tester Name<div class="writeline"></div></div><div>Date<div class="writeline"></div></div></div>
+  </div>
+</div>
+
+<!-- ==================== SECTION 6: BILLING ==================== -->
+<h1 id="billing">Section 6 — Billing</h1>
+
+<div class="testcase">
+  <div class="tc-head">TEST 6.1 — OPEN A PATIENT'S BILLING INFORMATION</div>
+  <div class="tc-body">
+    <div class="tc-who"><strong>Who should test:</strong> Biller or Admin</div>
+    <strong>START HERE:</strong>
+    <ol class="steps">
+      <li>Log in as <code>billing.uat@uat.test</code>.</li>
+      <li>Click <strong>Patients</strong>, then click on <strong>Uat Testpatient</strong> to open their chart.</li>
+      <li>Look for the Operations / Billing area of the chart.</li>
+    </ol>
+    <div class="shot"><img src="screenshots/20-patient-chart-operations.png" alt="Patient chart operations tab"><div class="cap">A Biller's view of a patient's chart, opened to the billing-relevant area.</div></div>
+    <div class="expected"><strong class="label">Expected result</strong>You should be able to see (and, depending on your role, add) charges, claims, payments, and statements for this patient — but you should NOT see any clinical notes or diagnoses.</div>
+    <div class="passfail"><span><span class="box"></span>PASS</span><span><span class="box"></span>FAIL</span></div>
+    <div class="fail-notes"><div class="label">If it failed, what happened?</div><div class="writeline"></div><div class="writeline"></div></div>
+    <div class="tester-row"><div>Tester Name<div class="writeline"></div></div><div>Date<div class="writeline"></div></div></div>
+  </div>
+</div>
+
+<!-- ==================== SECTION 7: ADMINISTRATION ==================== -->
+<h1 id="admin">Section 7 — Administration</h1>
+
+<div class="testcase">
+  <div class="tc-head">TEST 7.1 — VIEW STAFF USERS LIST</div>
+  <div class="tc-body">
+    <div class="tc-who"><strong>Who should test:</strong> Admin</div>
+    <strong>START HERE:</strong>
+    <ol class="steps">
+      <li>Log in as Admin.</li>
+      <li>Click <strong>Administration</strong>, then <strong>Users</strong>.</li>
+    </ol>
+    <div class="shot"><img src="screenshots/09-users-list.png" alt="Users list"><div class="cap">The staff Users list for UAT Test Clinic.</div></div>
+    <div class="expected"><strong class="label">Expected result</strong>A list of every staff member in this clinic appears, showing name, role, and status.</div>
+    <div class="passfail"><span><span class="box"></span>PASS</span><span><span class="box"></span>FAIL</span></div>
+    <div class="fail-notes"><div class="label">If it failed, what happened?</div><div class="writeline"></div><div class="writeline"></div></div>
+    <div class="tester-row"><div>Tester Name<div class="writeline"></div></div><div>Date<div class="writeline"></div></div></div>
+  </div>
+</div>
+
+<div class="testcase">
+  <div class="tc-head">TEST 7.2 — VIEW CLINIC SETTINGS</div>
+  <div class="tc-body">
+    <div class="tc-who"><strong>Who should test:</strong> Admin</div>
+    <strong>START HERE:</strong>
+    <ol class="steps">
+      <li>Click <strong>Clinic settings</strong>.</li>
+    </ol>
+    <div class="shot"><img src="screenshots/10-clinic-settings.png" alt="Clinic settings"><div class="cap">Clinic Settings — Locations tab.</div></div>
+    <div class="expected"><strong class="label">Expected result</strong>Tabs appear for Locations, Appointment types, Payers, Cash-pay prices, In-home PT areas, and Mobile Care settings.</div>
+    <div class="passfail"><span><span class="box"></span>PASS</span><span><span class="box"></span>FAIL</span></div>
+    <div class="fail-notes"><div class="label">If it failed, what happened?</div><div class="writeline"></div><div class="writeline"></div></div>
+    <div class="tester-row"><div>Tester Name<div class="writeline"></div></div><div>Date<div class="writeline"></div></div></div>
+  </div>
+</div>
+
+<!-- ==================== SECTION 8: REPORTS ==================== -->
+<h1 id="reports">Section 8 — Reports</h1>
+
+<div class="testcase">
+  <div class="tc-head">TEST 8.1 — VIEW REPORTS</div>
+  <div class="tc-body">
+    <div class="tc-who"><strong>Who should test:</strong> Admin only</div>
+    <strong>START HERE:</strong>
+    <ol class="steps">
+      <li>Log in as Admin.</li>
+      <li>Click <strong>Reports</strong>.</li>
+    </ol>
+    <div class="shot"><img src="screenshots/11-reports.png" alt="Reports page"><div class="cap">The Reports page — Operational report tab.</div></div>
+    <div class="expected"><strong class="label">Expected result</strong>Tabs appear for Operational report, Billing summary, AR aging, and Denial work queue, each with numbers and tables.</div>
+    <div class="passfail"><span><span class="box"></span>PASS</span><span><span class="box"></span>FAIL</span></div>
+    <div class="fail-notes"><div class="label">If it failed, what happened?</div><div class="writeline"></div><div class="writeline"></div></div>
+    <div class="tester-row"><div>Tester Name<div class="writeline"></div></div><div>Date<div class="writeline"></div></div></div>
+  </div>
+</div>
+<div class="note-box">Also try logging in as a Therapist or Front Desk user and confirm "Reports" is <strong>not</strong> visible anywhere in their menu — Reports is Admin-only.</div>
+
+<!-- ==================== SECTION 9: SAFETY ==================== -->
+<h1 id="safety">Section 9 — Safety &amp; Audit</h1>
+
+<div class="testcase">
+  <div class="tc-head">TEST 9.1 — VIEW SAFETY &amp; AUDIT</div>
+  <div class="tc-body">
+    <div class="tc-who"><strong>Who should test:</strong> Admin, Director, or Compliance</div>
+    <strong>START HERE:</strong>
+    <ol class="steps">
+      <li>Log in as Admin.</li>
+      <li>Click <strong>Safety &amp; audit</strong>.</li>
+    </ol>
+    <div class="shot"><img src="screenshots/12-safety-audit.png" alt="Safety and audit page"><div class="cap">The Safety &amp; Audit page.</div></div>
+    <div class="expected"><strong class="label">Expected result</strong>A page appears describing the compliance queue and audit trail for this organization.</div>
+    <div class="passfail"><span><span class="box"></span>PASS</span><span><span class="box"></span>FAIL</span></div>
+    <div class="fail-notes"><div class="label">If it failed, what happened?</div><div class="writeline"></div><div class="writeline"></div></div>
+    <div class="tester-row"><div>Tester Name<div class="writeline"></div></div><div>Date<div class="writeline"></div></div></div>
+  </div>
+</div>
+
+<!-- ==================== SECTION 10: OTHER ROLES ==================== -->
+<h1 id="otherroles">Section 10 — Other Staff Roles</h1>
+<p>These quick checks confirm each remaining role can log in and lands on a sensible home screen for their job.</p>
+
+<div class="testcase">
+  <div class="tc-head">TEST 10.1 — PTA HOME SCREEN</div>
+  <div class="tc-body">
+    <div class="tc-who"><strong>Who should test:</strong> PTA</div>
+    <strong>START HERE:</strong>
+    <ol class="steps"><li>Log in as <code>pta.uat@uat.test</code>.</li></ol>
+    <div class="shot"><img src="screenshots/16-pta-home.png" alt="PTA home screen"><div class="cap">The PTA's home screen.</div></div>
+    <div class="expected"><strong class="label">Expected result</strong>A home screen appears with Patients, Documentation, Scheduling, and Mobile Care tiles.</div>
+    <div class="passfail"><span><span class="box"></span>PASS</span><span><span class="box"></span>FAIL</span></div>
+    <div class="fail-notes"><div class="label">If it failed, what happened?</div><div class="writeline"></div></div>
+    <div class="tester-row"><div>Tester Name<div class="writeline"></div></div><div>Date<div class="writeline"></div></div></div>
+  </div>
+</div>
+
+<div class="testcase">
+  <div class="tc-head">TEST 10.2 — FRONT DESK HOME SCREEN &amp; SCHEDULE</div>
+  <div class="tc-body">
+    <div class="tc-who"><strong>Who should test:</strong> Front Desk / Scheduler</div>
+    <strong>START HERE:</strong>
+    <ol class="steps"><li>Log in as <code>frontdesk.uat@uat.test</code>.</li><li>Click <strong>Scheduling</strong>.</li></ol>
+    <div class="shot"><img src="screenshots/17-frontdesk-home.png" alt="Front Desk home screen"><div class="cap">Front Desk home screen.</div></div>
+    <div class="shot"><img src="screenshots/18-frontdesk-schedule.png" alt="Front Desk schedule view"><div class="cap">Front Desk's view of the Schedule.</div></div>
+    <div class="expected"><strong class="label">Expected result</strong>Front Desk can see and use the calendar just like Admin, but should NOT see Reports.</div>
+    <div class="passfail"><span><span class="box"></span>PASS</span><span><span class="box"></span>FAIL</span></div>
+    <div class="fail-notes"><div class="label">If it failed, what happened?</div><div class="writeline"></div></div>
+    <div class="tester-row"><div>Tester Name<div class="writeline"></div></div><div>Date<div class="writeline"></div></div></div>
+  </div>
+</div>
+
+<div class="testcase">
+  <div class="tc-head">TEST 10.3 — BILLER HOME SCREEN</div>
+  <div class="tc-body">
+    <div class="tc-who"><strong>Who should test:</strong> Biller</div>
+    <strong>START HERE:</strong>
+    <ol class="steps"><li>Log in as <code>billing.uat@uat.test</code>.</li></ol>
+    <div class="shot"><img src="screenshots/19-biller-home.png" alt="Biller home screen"><div class="cap">The Biller's home screen.</div></div>
+    <div class="expected"><strong class="label">Expected result</strong>A home screen appears focused on billing — the Biller should NOT see Documentation or Mobile Care tiles.</div>
+    <div class="passfail"><span><span class="box"></span>PASS</span><span><span class="box"></span>FAIL</span></div>
+    <div class="fail-notes"><div class="label">If it failed, what happened?</div><div class="writeline"></div></div>
+    <div class="tester-row"><div>Tester Name<div class="writeline"></div></div><div>Date<div class="writeline"></div></div></div>
+  </div>
+</div>
+
+<!-- ==================== SECTION 11: SUPER ADMIN ==================== -->
+<h1 id="superadmin">Section 11 — Platform / Super Admin</h1>
+
+<div class="testcase">
+  <div class="tc-head">TEST 11.1 — SUPER ADMIN HOME DASHBOARD</div>
+  <div class="tc-body">
+    <div class="tc-who"><strong>Who should test:</strong> Super Admin</div>
+    <strong>START HERE:</strong>
+    <ol class="steps"><li>Log in as <code>superadmin.uat@uat.test</code>.</li></ol>
+    <div class="shot"><img src="screenshots/21-superadmin-home.png" alt="Super Admin home dashboard"><div class="cap">The platform-wide Super Admin dashboard.</div></div>
+    <div class="expected"><strong class="label">Expected result</strong>A platform-wide dashboard appears with counts of organizations, users, and patients across every clinic — not just one.</div>
+    <div class="passfail"><span><span class="box"></span>PASS</span><span><span class="box"></span>FAIL</span></div>
+    <div class="fail-notes"><div class="label">If it failed, what happened?</div><div class="writeline"></div></div>
+    <div class="tester-row"><div>Tester Name<div class="writeline"></div></div><div>Date<div class="writeline"></div></div></div>
+  </div>
+</div>
+
+<div class="testcase">
+  <div class="tc-head">TEST 11.2 — ADMINISTRATION HUB</div>
+  <div class="tc-body">
+    <div class="tc-who"><strong>Who should test:</strong> Super Admin</div>
+    <strong>START HERE:</strong>
+    <ol class="steps"><li>Click <strong>Administration</strong>.</li></ol>
+    <div class="shot"><img src="screenshots/22-superadmin-admin-hub.png" alt="Administration hub"><div class="cap">The Super Admin Administration hub.</div></div>
+    <div class="expected"><strong class="label">Expected result</strong>Four buttons appear: Clients, Users, Credentials, Mobile Care Defaults.</div>
+    <div class="passfail"><span><span class="box"></span>PASS</span><span><span class="box"></span>FAIL</span></div>
+    <div class="fail-notes"><div class="label">If it failed, what happened?</div><div class="writeline"></div></div>
+    <div class="tester-row"><div>Tester Name<div class="writeline"></div></div><div>Date<div class="writeline"></div></div></div>
+  </div>
+</div>
+
+<div class="testcase">
+  <div class="tc-head">TEST 11.3 — CLIENT MANAGEMENT</div>
+  <div class="tc-body">
+    <div class="tc-who"><strong>Who should test:</strong> Super Admin</div>
+    <strong>START HERE:</strong>
+    <ol class="steps"><li>Click <strong>Clients</strong> from the Administration hub.</li></ol>
+    <div class="shot"><img src="screenshots/23-client-management.png" alt="Client Management list"><div class="cap">Client Management — every organization on the platform.</div></div>
+    <div class="expected"><strong class="label">Expected result</strong>A list of every clinic ("client") on the platform appears, each with its own client number, status, plan, and user count.</div>
+    <div class="passfail"><span><span class="box"></span>PASS</span><span><span class="box"></span>FAIL</span></div>
+    <div class="fail-notes"><div class="label">If it failed, what happened?</div><div class="writeline"></div></div>
+    <div class="tester-row"><div>Tester Name<div class="writeline"></div></div><div>Date<div class="writeline"></div></div></div>
+  </div>
+</div>
+
+<div class="testcase">
+  <div class="tc-head">TEST 11.4 — CREDENTIAL DASHBOARD</div>
+  <div class="tc-body">
+    <div class="tc-who"><strong>Who should test:</strong> Super Admin</div>
+    <strong>START HERE:</strong>
+    <ol class="steps"><li>Click <strong>Credentials</strong> from the Administration hub.</li></ol>
+    <div class="shot"><img src="screenshots/24-credential-dashboard.png" alt="Credential Dashboard"><div class="cap">The platform-wide license/credential dashboard.</div></div>
+    <div class="expected"><strong class="label">Expected result</strong>A dashboard of clinician licenses appears across every clinic, with tabs for Needs Attention, Expired, Critical, Expiring Soon, and All Licenses.</div>
+    <div class="passfail"><span><span class="box"></span>PASS</span><span><span class="box"></span>FAIL</span></div>
+    <div class="fail-notes"><div class="label">If it failed, what happened?</div><div class="writeline"></div></div>
+    <div class="tester-row"><div>Tester Name<div class="writeline"></div></div><div>Date<div class="writeline"></div></div></div>
+  </div>
+</div>
+
+<!-- ==================== SECTION 12: PATIENT PORTAL ==================== -->
+<h1 id="portal">Section 12 — Patient Portal</h1>
+
+<div class="testcase">
+  <div class="tc-head">TEST 12.1 — PATIENT PORTAL HOME</div>
+  <div class="tc-body">
+    <div class="tc-who"><strong>Who should test:</strong> Patient</div>
+    <strong>START HERE:</strong>
+    <ol class="steps"><li>Log in as <code>patient.uat@uat.test</code>.</li></ol>
+    <div class="shot"><img src="screenshots/25-portal-home.png" alt="Patient portal home"><div class="cap">The Patient Portal home screen.</div></div>
+    <div class="expected"><strong class="label">Expected result</strong>A simple home screen appears showing the next appointment, balance, messages, and a home exercise program summary.</div>
+    <div class="passfail"><span><span class="box"></span>PASS</span><span><span class="box"></span>FAIL</span></div>
+    <div class="fail-notes"><div class="label">If it failed, what happened?</div><div class="writeline"></div></div>
+    <div class="tester-row"><div>Tester Name<div class="writeline"></div></div><div>Date<div class="writeline"></div></div></div>
+  </div>
+</div>
+
+<div class="testcase">
+  <div class="tc-head">TEST 12.2 — MY APPOINTMENTS</div>
+  <div class="tc-body">
+    <div class="tc-who"><strong>Who should test:</strong> Patient</div>
+    <strong>START HERE:</strong>
+    <ol class="steps"><li>Click <strong>My Appointments</strong>.</li></ol>
+    <div class="shot"><img src="screenshots/26-portal-appointments.png" alt="Patient portal appointments"><div class="cap">Patient Portal — My Appointments.</div></div>
+    <div class="expected"><strong class="label">Expected result</strong>The test appointment (scheduled for tomorrow) appears, with Reschedule/Cancel buttons if it's far enough away in time.</div>
+    <div class="passfail"><span><span class="box"></span>PASS</span><span><span class="box"></span>FAIL</span></div>
+    <div class="fail-notes"><div class="label">If it failed, what happened?</div><div class="writeline"></div></div>
+    <div class="tester-row"><div>Tester Name<div class="writeline"></div></div><div>Date<div class="writeline"></div></div></div>
+  </div>
+</div>
+
+<div class="testcase">
+  <div class="tc-head">TEST 12.3 — IN-HOME PT REQUEST STATUS</div>
+  <div class="tc-body">
+    <div class="tc-who"><strong>Who should test:</strong> Patient</div>
+    <strong>START HERE:</strong>
+    <ol class="steps"><li>Click <strong>In-Home PT</strong>.</li></ol>
+    <div class="shot"><img src="screenshots/27-portal-mobile-care.png" alt="Patient portal in-home PT"><div class="cap">Patient Portal — In-Home PT request status.</div></div>
+    <div class="expected"><strong class="label">Expected result</strong>The test Mobile Care request appears with a plain-language status like "Request Received" or "Finding Therapist" — never any internal matching scores.</div>
+    <div class="passfail"><span><span class="box"></span>PASS</span><span><span class="box"></span>FAIL</span></div>
+    <div class="fail-notes"><div class="label">If it failed, what happened?</div><div class="writeline"></div></div>
+    <div class="tester-row"><div>Tester Name<div class="writeline"></div></div><div>Date<div class="writeline"></div></div></div>
+  </div>
+</div>
+
+<div class="testcase">
+  <div class="tc-head">TEST 12.4 — PROFILE</div>
+  <div class="tc-body">
+    <div class="tc-who"><strong>Who should test:</strong> Patient</div>
+    <strong>START HERE:</strong>
+    <ol class="steps"><li>Click <strong>Profile</strong>.</li><li>Change the phone number field, then click <strong>Submit changes for review</strong>.</li></ol>
+    <div class="shot"><img src="screenshots/28-portal-profile.png" alt="Patient portal profile"><div class="cap">Patient Portal — Profile.</div></div>
+    <div class="expected"><strong class="label">Expected result</strong>A message says your change was submitted for staff review — the phone number does NOT change immediately on screen.</div>
+    <div class="passfail"><span><span class="box"></span>PASS</span><span><span class="box"></span>FAIL</span></div>
+    <div class="fail-notes"><div class="label">If it failed, what happened?</div><div class="writeline"></div></div>
+    <div class="tester-row"><div>Tester Name<div class="writeline"></div></div><div>Date<div class="writeline"></div></div></div>
+  </div>
+</div>
+
+<!-- ==================== SECTION 13: ISOLATION ==================== -->
+<h1 id="isolation">Section 13 — Two-Clinic Isolation Check</h1>
+<div class="note-box">This is one of the most important checks in this entire guide — it confirms one clinic can never see another clinic's patients or data.</div>
+
+<div class="testcase">
+  <div class="tc-head">TEST 13.1 — CLINICS CANNOT SEE EACH OTHER'S PATIENTS</div>
+  <div class="tc-body">
+    <div class="tc-who"><strong>Who should test:</strong> Super Admin (or ask your platform administrator)</div>
+    <strong>START HERE:</strong>
+    <ol class="steps">
+      <li>Log in as <code>admin.uat@uat.test</code> (UAT Test Clinic) and confirm you can see "Uat Testpatient" under Patients.</li>
+      <li>Log out.</li>
+      <li>Log in as an admin belonging to a <strong>different</strong> clinic (for example, one of the platform's other demo organizations).</li>
+      <li>Search that clinic's Patients list for "Uat Testpatient."</li>
+    </ol>
+    <div class="expected"><strong class="label">Expected result</strong>Nothing is found. The other clinic cannot see "Uat Testpatient" at all.</div>
+    <div class="passfail"><span><span class="box"></span>PASS</span><span><span class="box"></span>FAIL</span></div>
+    <div class="fail-notes"><div class="label">If it failed, what happened?</div><div class="writeline"></div><div class="writeline"></div></div>
+    <div class="tester-row"><div>Tester Name<div class="writeline"></div></div><div>Date<div class="writeline"></div></div></div>
+  </div>
+</div>
+
+<!-- ==================== SECTION 14: LOGOUT ==================== -->
+<h1 id="logout">Section 14 — Logging Out</h1>
+
+<div class="testcase">
+  <div class="tc-head">TEST 14.1 — SIGN OUT</div>
+  <div class="tc-body">
+    <div class="tc-who"><strong>Who should test:</strong> Anyone</div>
+    <strong>START HERE:</strong>
+    <ol class="steps">
+      <li>Click <strong>Logout</strong> (top right of any screen).</li>
+      <li>Try going back in your browser, or reloading the page.</li>
+    </ol>
+    <div class="expected"><strong class="label">Expected result</strong>You're returned to the Sign In screen and cannot see any app pages without logging in again.</div>
+    <div class="passfail"><span><span class="box"></span>PASS</span><span><span class="box"></span>FAIL</span></div>
+    <div class="fail-notes"><div class="label">If it failed, what happened?</div><div class="writeline"></div><div class="writeline"></div></div>
+    <div class="tester-row"><div>Tester Name<div class="writeline"></div></div><div>Date<div class="writeline"></div></div></div>
+  </div>
+</div>
+
+<!-- ==================== SUMMARY ==================== -->
+<h1 id="summary">Final Summary Sheet</h1>
+<p>Fill this in once you've gone through the whole guide.</p>
+<table>
+<tr><th>Section</th><th>Total tests</th><th>Passed</th><th>Failed</th></tr>
+<tr><td>1 — Login &amp; Getting Started</td><td>2</td><td></td><td></td></tr>
+<tr><td>2 — Patients</td><td>2</td><td></td><td></td></tr>
+<tr><td>3 — Scheduling</td><td>2</td><td></td><td></td></tr>
+<tr><td>4 — Clinical Documentation</td><td>2</td><td></td><td></td></tr>
+<tr><td>5 — Mobile Care</td><td>2</td><td></td><td></td></tr>
+<tr><td>6 — Billing</td><td>1</td><td></td><td></td></tr>
+<tr><td>7 — Administration</td><td>2</td><td></td><td></td></tr>
+<tr><td>8 — Reports</td><td>1</td><td></td><td></td></tr>
+<tr><td>9 — Safety &amp; Audit</td><td>1</td><td></td><td></td></tr>
+<tr><td>10 — Other Staff Roles</td><td>3</td><td></td><td></td></tr>
+<tr><td>11 — Platform / Super Admin</td><td>4</td><td></td><td></td></tr>
+<tr><td>12 — Patient Portal</td><td>4</td><td></td><td></td></tr>
+<tr><td>13 — Two-Clinic Isolation</td><td>1</td><td></td><td></td></tr>
+<tr><td>14 — Logging Out</td><td>1</td><td></td><td></td></tr>
+<tr><td><strong>TOTAL</strong></td><td><strong>28</strong></td><td></td><td></td></tr>
+</table>
+<p>Hand this sheet, along with any comments written on failed tests, back to your development team so issues can be looked into. That's the whole process — no technical background required.</p>
+<p style="margin-top:30px;">Tester Name: <span class="writeline" style="display:inline-block;width:260px;"></span></p>
+<p>Signature: <span class="writeline" style="display:inline-block;width:260px;"></span> &nbsp;&nbsp; Date: <span class="writeline" style="display:inline-block;width:160px;"></span></p>
+
+</body>
+</html>
