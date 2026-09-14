@@ -1,0 +1,27 @@
+# systemd unit for running the Django app under Gunicorn.
+#
+# Install:
+#   sudo cp deploy/physiotrac360.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now physiotrac360
+#
+# Adjust User/Group, WorkingDirectory, and the venv path below to match where
+# you actually cloned the repo on the instance.
+
+[Unit]
+Description=PhysioTrac360 (Gunicorn)
+After=network.target
+
+[Service]
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/PhysioTrac360
+EnvironmentFile=/home/ubuntu/PhysioTrac360/deploy/env.production
+ExecStart=/home/ubuntu/PhysioTrac360/.venv/bin/gunicorn \
+    --workers 2 \
+    --bind 127.0.0.1:8000 \
+    config.wsgi:application
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

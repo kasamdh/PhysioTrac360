@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *.sqlite3
 .env
+deploy/env.production
 staticfiles/
 media/
 private_media/
